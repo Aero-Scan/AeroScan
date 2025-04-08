@@ -19,7 +19,7 @@ The goal of this project is to turn devices into network scanners that can proac
 ## Installation
 
 ```bash
-git clone https://github.com/ivenator1/AeroScan
+git clone https://github.com/Aero-Scan/AeroScan.git
 cd AeroScan
 ```
 ## Usage
