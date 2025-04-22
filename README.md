@@ -17,7 +17,7 @@ The **AeroScan** project turns Raspberry Pis' into network scanners. Each Pi col
 
 ## Introduction
 
-AeroScan leverages the Raspberry Pi’s portability and Prometheus’s monitoring capabilities to provide a lightweight, distributed network scanning solution. Deploy Pis at remote locations or across your premises to continually monitor connectivity quality and wireless environment health.
+AeroScan leverages the Raspberry Pi’s portability, and wifi scanning capability and Prometheus’s monitoring capabilities to provide a lightweight, distributed network scanning solution. Deploy Pis at remote locations or across your premises to continually monitor connectivity quality and wireless environment health.
 
 ## Architecture
 
@@ -52,15 +52,6 @@ AeroScan leverages the Raspberry Pi’s portability and Prometheus’s monitorin
     ```bash
     git clone https://github.com/Aero-Scan/AeroScan.git
     cd AeroScan
-    ```
-
-2. **Prepare each Raspberry Pi**
-    ```bash
-    cd pi/config
-    # (Optional) Review and edit pi_config.txt
-    sudo apt-get update
-    sudo apt-get install python3-pip wireless-tools iproute2 python3-rpi.gpio
-    pip3 install prometheus_client speedtest-cli
     ```
 
 3. **Deploy Docker Stack**
