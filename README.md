@@ -147,6 +147,6 @@ You are free to **share** (copy and redistribute the material in any medium or f
 * **No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
 
 For more information, see the [full license text](LICENSE) in this repository or visit:
-[https://creativecommons.org/licenses/by-nc/4.0/](https://creativecommons.org/licenses/by-nc/4.0/)
+[https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 
