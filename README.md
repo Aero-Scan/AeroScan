@@ -1,104 +1,162 @@
-# AeroScan
+# AeroScan - Wireless Network Q&P Monitoring
 
-The **AeroScan** project turns Raspberry Pis' into network scanners. Each Pi collects key network performance metrics—ping latency, jitter, TTL, download/upload speeds, signal strength, and nearby access point details—and exposes them via a Prometheus endpoint. A Docker‑based stack bundles Prometheus and Grafana for centralized metrics collection and visualization.
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
-## Table of Contents
+## Overview
 
-1. [Introduction](#introduction)  
-2. [Architecture](#architecture)  
-3. [Features](#features)  
-4. [Prerequisites](#prerequisites)  
-5. [Installation](#installation)  
-6. [Configuration](#configuration)  
-7. [Usage](#usage)  
-8. [Exported Metrics](#exported-metrics)  
-9. [Contributing](#contributing)  
-10. [License](#license)  
+AeroScan is an IoT-based system designed to monitor the Quality and Performance (Q&P) of the wireless network infrastructure at Murdoch University (MU). Developed for MU IT Services (ITS), this project utilizes Raspberry Pi devices deployed across campus to collect real-time network metrics, providing valuable insights into network health, identifying potential issues, and helping to ensure a reliable wireless experience for students and staff.
 
-## Introduction
-
-AeroScan leverages the Raspberry Pi’s portability, and wifi scanning capability and Prometheus’s monitoring capabilities to provide a lightweight, distributed network scanning solution. Deploy Pis at remote locations or across your premises to continually monitor connectivity quality and wireless environment health.
-
-## Architecture
-
-- **Pi Agent**: A Python script (`main.py`) running on each Raspberry Pi. Collects network metrics and serves them on port `8000` via Prometheus’s Python client.  
-- **Docker Stack**: A `docker-compose` setup with:  
-  - **Prometheus** (port 9090) scraping each Pi’s exporter endpoint.  
-  - **Grafana** (port 3000) for dashboards and alerting.  
-- **Configuration**: Modify IP targets and interface names via the `pi/config/pi_config.txt` and `Docker/prometheus.yml` files.
+The system addresses the need for automated, continuous monitoring, moving beyond manual checks and reactive troubleshooting. Data collected by the Raspberry Pi units is visualized through a centralized Grafana dashboard, offering ITS a clear view of network performance across different locations.
 
 ## Features
 
-- **Ping Metrics**: Latency, TTL, and calculated jitter.  
-- **Speedtest Metrics**: Download, upload speeds, and ping.  
-- **Wireless Metrics**: Connected network’s signal strength and link quality.  
-- **Wi‑Fi Scan**: Nearby AP SSIDs, BSSIDs, channels, and RSSI values.  
-- **Device Identifier**: Persistent unique ID based on Pi serial number and timestamp, triggerable via dual‑button press.  
-- **Prometheus Export**: All metrics exposed as Prometheus Gauges.
+* **Real-Time Monitoring:** Continuously scans and collects data on wireless network performance.
+* **Comprehensive Metrics:** Gathers data on:
+    * Wireless Signal Strength (RSSI)
+    * Wireless Noise Levels
+    * Network Latency (Ping Times)
+    * Network Jitter
+    * Internet Bandwidth (Upload/Download via Speedtest)
+    * Connected Access Point details (SSID, BSSID)
+* **Multi-AP Scanning:** Capable of scanning and reporting on multiple Wireless Access Points (WAPs) within range.
+* **Disruption Handling:** Designed to detect when a connected WAP goes down, automatically scan for, and connect to the next available WAP.
+* **Alerting:** Sends notifications to MU ITS when a monitored WAP becomes unavailable (requires configuration with an alerting system like Prometheus Alertmanager).
+* **Scalability:** Built to support multiple Raspberry Pi devices deployed across campus for wide coverage.
+* **Centralized Visualization:** Integrates with Prometheus for data scraping and Grafana for displaying metrics on a dashboard.
+* **Remote Accessibility:** Devices can be configured for remote access (e.g., via SSH) for maintenance and troubleshooting.
 
-## Prerequisites
+## Technology Stack
 
-- **Hardware**: Raspberry Pi.  
-- **OS**: Raspberry Pi OS (or Debian‑based distro).  
-- **Dependencies on Pi**:  
-  - Python 3  
-  - `pip3` packages: `prometheus_client`, `speedtest-cli`  
-  - System packages: `wireless-tools`, `iproute2`, `python3-rpi.gpio`  
-- **Docker Host**: Docker & Docker Compose v1.27+
+* **Hardware:** Raspberry Pi (Tested on Zero WH, Pi 4 Model B recommended for 5GHz)
+* **OS:** Raspberry Pi OS (or other compatible Linux distribution)
+* **Core Scripting:** Python 3
+* **Data Collection Tools:**
+    * `ping` (from iputils or similar)
+    * `speedtest-cli`
+    * `iw`
+* **Data Storage/Scraping:** Prometheus
+* **Data Visualization:** Grafana
+* **Version Control:** Git / GitHub
 
-## Installation
+## Hardware Requirements
 
-1. **Clone the repository**
+* Raspberry Pi (Zero WH or Pi 4 Model B recommended)
+* MicroSD Card (>= 16GB recommended, e.g., SanDisk Ultra 32GB)
+* Reliable Power Supply for the Raspberry Pi
+* (Optional) Case for the Raspberry Pi
+
+## Setup and Installation
+
+Follow these steps to set up an AeroScan monitoring node on a Raspberry Pi:
+
+1.  **Prepare Raspberry Pi OS:**
+    * Download the latest Raspberry Pi OS Lite (64-bit recommended if using Pi 4).
+    * Flash the OS onto the MicroSD card using Raspberry Pi Imager or BalenaEtcher.
+    * Enable SSH and configure Wi-Fi credentials headless (via Raspberry Pi Imager or by creating `ssh` and `wpa_supplicant.conf` files in the boot partition).
+
+2.  **Initial Boot & Configuration:**
+    * Insert the SD card into the Pi and power it on.
+    * Connect to the Pi via SSH (`ssh pi@<raspberrypi_ip>`). Default password is `raspberry`.
+    * Run `sudo raspi-config`:
+        * Change the default password.
+        * Set locale, timezone, and keyboard layout.
+        * Expand the filesystem.
+        * Update the system: `sudo apt update && sudo apt upgrade -y`
+
+3.  **Install Dependencies:**
+    * Install Python 3 pip and necessary tools:
+        ```bash
+        sudo apt update
+        sudo apt install -y python3-pip git iw speedtest-cli
+        # Add any other system dependencies required by your scripts
+        ```
+    * Install required Python libraries:
+        ```bash
+        # Navigate to the cloned repo directory first (see step 4)
+        # Example: pip3 install -r requirements.txt
+        # (Create a requirements.txt file listing libraries like 'prometheus_client', etc.)
+        ```
+
+4.  **Clone AeroScan Repository:**
     ```bash
-    git clone https://github.com/Aero-Scan/AeroScan.git
+    git clone [https://github.com/Aero-Scan/AeroScan.git](https://github.com/Aero-Scan/AeroScan.git)
     cd AeroScan
     ```
 
-3. **Deploy Docker Stack**
-    ```bash
-    cd Docker
-    docker-compose up -d
-    ```
+5.  **Configure AeroScan Script:**
+    * (Describe any necessary configuration steps here - e.g., editing a config file, setting environment variables for target ping hosts, Prometheus endpoint details, etc.)
+    * Ensure the script has execute permissions if needed (`chmod +x your_script.py`).
 
-## Configuration
+6.  **Setup Prometheus:**
+    * Install Prometheus on a central server (or another Pi).
+    * Configure Prometheus (`prometheus.yml`) to scrape the metrics endpoint exposed by the Python script on each AeroScan Pi (e.g., `http://<aeroscan_pi_ip>:<port>/metrics`).
+    * Example scrape config:
+      ```yaml
+      scrape_configs:
+        - job_name: 'aeroscan_nodes'
+          static_configs:
+            - targets: ['<pi1_ip>:<port>', '<pi2_ip>:<port>'] # Replace with actual IPs/ports
+      ```
 
-- **Pi Agent**: Edit `pi/config/pi_config.txt` to adjust the install commands or execution flags as needed.  
-- **Prometheus**: In `Docker/prometheus.yml`, add each Pi’s IP (e.g., `192.168.x.x:8000`) under `static_configs.targets`.
+7.  **Setup Grafana:**
+    * Install Grafana on a central server.
+    * Add Prometheus as a data source in Grafana.
+    * Import or create a Grafana dashboard to visualize the metrics collected (e.g., signal strength over time, ping latency, bandwidth). (Consider exporting your dashboard as JSON and adding it to the repo).
+
+8.  **Run the Monitoring Script:**
+    * **Manually:** `python3 /path/to/your/aeroscan_script.py`
+    * **As a Service (Recommended):** Create a systemd service file to run the script automatically on boot and restart it if it fails.
+        * Create `/etc/systemd/system/aeroscan.service`:
+          ```ini
+          [Unit]
+          Description=AeroScan Network Monitor
+          After=network.target
+
+          [Service]
+          User=pi # Or another user
+          WorkingDirectory=/home/pi/AeroScan # Adjust path
+          ExecStart=/usr/bin/python3 /home/pi/AeroScan/your_script.py # Adjust path
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          ```
+        * Enable and start the service:
+          ```bash
+          sudo systemctl enable aeroscan.service
+          sudo systemctl start aeroscan.service
+          sudo systemctl status aeroscan.service
+          ```
 
 ## Usage
 
-- **Run the Pi exporter**
-    ```bash
-    cd ~/AeroScan/pi/software
-    sudo python3 main.py
-    ```
+Once set up, the AeroScan Raspberry Pi node will automatically collect network data and expose it for Prometheus to scrape.
 
-- **Access Prometheus**  
-  Browse to `http://<docker-host>:9090`.
+* **Accessing Data:** View the collected metrics and network status via the configured Grafana dashboard.
+* **Troubleshooting:** Connect to individual Raspberry Pi nodes via SSH for maintenance or log checking (e.g., `journalctl -u aeroscan.service`).
 
-- **Access Grafana**  
-  Browse to `http://<docker-host>:3000` (default credentials: `admin`/`admin`).
+## Configuration
 
-## Exported Metrics
+*(Detail specific configuration options here. Examples:)*
 
-| Metric                           | Description                                         |
-|----------------------------------|-----------------------------------------------------|
-| `network_ping_response_time_ms`  | Ping first‑packet RTT (ms)                          |
-| `network_ttl`                    | Ping first‑packet TTL                               |
-| `network_jitter_ms`              | Ping jitter calculated over 5 packets (ms)          |
-| `speedtest_ping_ms`              | Speedtest ping (ms)                                 |
-| `download_speed_mbps`            | Download throughput (Mbps)                          |
-| `upload_speed_mbps`              | Upload throughput (Mbps)                            |
-| `signal_strength_dbm`            | Connected Wi‑Fi signal strength (dBm)               |
-| `link_quality_percentage`        | Connected Wi‑Fi link quality (%)                    |
-| `wifi_ap_signal_strength_dbm{}`  | Nearby AP RSSI by `ssid`, `bssid`, and `channel`    |
-| `device_unique_identifier{}`     | Persistent device ID label                          |
-| `network_interface_info{}`       | Device IP information by `interface` and `ip_address` |
-
-## Contributing
-
-Contributions are welcome! Please fork the repo, create a feature branch, and submit a pull request. Ensure any new dependencies are documented in the README.
+* **`config.ini` / `.env`:** Explain any configuration files used by the script.
+    * `TARGET_HOSTS`: Comma-separated list of hosts/IPs to ping.
+    * `PROMETHEUS_PORT`: Port number for the metrics endpoint.
+    * `SCAN_INTERVAL_SECONDS`: How often to run the data collection.
+* **Prometheus (`prometheus.yml`):** Ensure the `scrape_configs` section includes targets for all active AeroScan nodes.
+* **Grafana:** Configure the Prometheus data source and set up dashboard panels.
 
 ## License
 
-This project is released under the [MIT License](LICENSE).
+AeroScan is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0)**.
+
+You are free to **share** (copy and redistribute the material in any medium or format) and **adapt** (remix, transform, and build upon the material) under the following terms:
+
+* **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
+* **NonCommercial** — You may not use the material for commercial purposes.
+* **No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
+
+For more information, see the [full license text](LICENSE) in this repository or visit:
+[https://creativecommons.org/licenses/by-nc/4.0/](https://creativecommons.org/licenses/by-nc/4.0/)
+
+
