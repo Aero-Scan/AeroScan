@@ -4,9 +4,9 @@
 
 ## Overview
 
-AeroScan is an IoT-based system designed to monitor the Quality and Performance (Q&P) of the wireless network infrastructure at Murdoch University (MU). Developed for MU IT Services (ITS), this project utilizes Raspberry Pi devices deployed across campus to collect real-time network metrics, providing valuable insights into network health, identifying potential issues, and helping to ensure a reliable wireless experience for students and staff.
+AeroScan is an IoT-based system designed to monitor the Quality and Performance (Q&P) of the wireless network infrastructure. Developed for scanning network performance, this project utilises Raspberry Pi devices deployed across site to collect real-time network metrics, providing valuable insights into network health, identifying potential issues, and helping to ensure a reliable wireless experience for students and staff.
 
-The system addresses the need for automated, continuous monitoring, moving beyond manual checks and reactive troubleshooting. Data collected by the Raspberry Pi units is visualized through a centralized Grafana dashboard, offering ITS a clear view of network performance across different locations.
+The system addresses the need for automated, continuous monitoring, moving beyond manual checks and reactive troubleshooting. Data collected by the Raspberry Pi units is visualized through a centralized Grafana dashboard, offering clear view of network performance across different locations.
 
 ## Features
 
@@ -20,20 +20,19 @@ The system addresses the need for automated, continuous monitoring, moving beyon
     * Connected Access Point details (SSID, BSSID)
 * **Multi-AP Scanning:** Capable of scanning and reporting on multiple Wireless Access Points (WAPs) within range.
 * **Disruption Handling:** Designed to detect when a connected WAP goes down, automatically scan for, and connect to the next available WAP.
-* **Alerting:** Sends notifications to MU ITS when a monitored WAP becomes unavailable (requires configuration with an alerting system like Prometheus Alertmanager).
 * **Scalability:** Built to support multiple Raspberry Pi devices deployed across campus for wide coverage.
 * **Centralized Visualization:** Integrates with Prometheus for data scraping and Grafana for displaying metrics on a dashboard.
 * **Remote Accessibility:** Devices can be configured for remote access (e.g., via SSH) for maintenance and troubleshooting.
 
 ## Technology Stack
 
-* **Hardware:** Raspberry Pi (Tested on Zero WH, Pi 4 Model B recommended for 5GHz)
-* **OS:** Raspberry Pi OS (or other compatible Linux distribution)
+* **Hardware:** Raspberry Pi
+* **OS:** Raspberry Pi OS 
 * **Core Scripting:** Python 3
 * **Data Collection Tools:**
     * `ping` (from iputils or similar)
     * `speedtest-cli`
-    * `iw`
+    * `nmcli`
 * **Data Storage/Scraping:** Prometheus
 * **Data Visualization:** Grafana
 * **Version Control:** Git / GitHub
@@ -43,26 +42,17 @@ The system addresses the need for automated, continuous monitoring, moving beyon
 * Raspberry Pi (Zero WH or Pi 4 Model B recommended)
 * MicroSD Card (>= 16GB recommended, e.g., SanDisk Ultra 32GB)
 * Reliable Power Supply for the Raspberry Pi
-* (Optional) Case for the Raspberry Pi
 
 ## Setup and Installation
 
 Follow these steps to set up an AeroScan monitoring node on a Raspberry Pi:
 
 1.  **Prepare Raspberry Pi OS:**
-    * Download the latest Raspberry Pi OS Lite (64-bit recommended if using Pi 4).
-    * Flash the OS onto the MicroSD card using Raspberry Pi Imager or BalenaEtcher.
-    * Enable SSH and configure Wi-Fi credentials headless (via Raspberry Pi Imager or by creating `ssh` and `wpa_supplicant.conf` files in the boot partition).
-
+    * Download the latest Raspberry Pi OS Lite (64-bit recommended for newer models).
+    * Flash the OS onto the MicroSD card using Raspberry Pi Imager.
+    * Use the pre-configured images, 64 bit is designed for eduroam and 32 bit is designed for eduroam2.4-legacy
 2.  **Initial Boot & Configuration:**
     * Insert the SD card into the Pi and power it on.
-    * Connect to the Pi via SSH (`ssh pi@<raspberrypi_ip>`). Default password is `raspberry`.
-    * Run `sudo raspi-config`:
-        * Change the default password.
-        * Set locale, timezone, and keyboard layout.
-        * Expand the filesystem.
-        * Update the system: `sudo apt update && sudo apt upgrade -y`
-
 3.  **Install Dependencies:**
     * Install Python 3 pip and necessary tools:
         ```bash
