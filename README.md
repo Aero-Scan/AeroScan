@@ -9,39 +9,67 @@ AeroScan is an IoT-based system designed to monitor the Quality and Performance 
 The system addresses the need for automated, continuous monitoring, moving beyond manual checks and reactive troubleshooting. Data collected by the Raspberry Pi units is visualized through a centralized Grafana dashboard, offering clear view of network performance across different locations.
 
 ## Features
-
+* **Real-time Visualization:** Integrates with Prometheus for metrics scraping and Grafana for dashboard display.
+* **Distributed Monitoring:** Uses low-cost Raspberry Pi devices as network sensors.
 * **Real-Time Monitoring:** Continuously scans and collects data on wireless network performance.
 * **Comprehensive Metrics:** Gathers data on:
-    * Wireless Signal Strength (RSSI)
-    * Wireless Noise Levels
-    * Network Latency (Ping Times)
-    * Network Jitter
+    * Wireless Signal Strength (RSSI) & Link Quality 
+    * Network Latency (Ping Times) & Jitter
     * Internet Bandwidth (Upload/Download via Speedtest)
-    * Connected Access Point details (SSID, BSSID)
+    * Connected Access Point Details (SSID, BSSID, Channel, Frequency, Signal Strength)
+    * Nearby Wireless Access Points Scan(SSID, BSSID, Channel, Frequency, Signal Strength)
+    * Device IP Address
 * **Multi-AP Scanning:** Capable of scanning and reporting on multiple Wireless Access Points (WAPs) within range.
 * **Disruption Handling:** Designed to detect when a connected WAP goes down, automatically scan for, and connect to the next available WAP.
 * **Scalability:** Built to support multiple Raspberry Pi devices deployed across campus for wide coverage.
 * **Centralized Visualization:** Integrates with Prometheus for data scraping and Grafana for displaying metrics on a dashboard.
 * **Remote Accessibility:** Devices can be configured for remote access (e.g., via SSH) for maintenance and troubleshooting.
+*   **Unique Device Identification:** Each Raspberry Pi sensor has a persistent unique identifier.
+*   **GPIO Interaction:** Includes functionality to reset the device identifier using physical buttons connected to GPIO pins (optional hardware setup).
 
 ## Technology Stack
 
-* **Hardware:** Raspberry Pi
-* **OS:** Raspberry Pi OS 
-* **Core Scripting:** Python 3
-* **Data Collection Tools:**
-    * `ping` (from iputils or similar)
-    * `speedtest-cli`
-    * `nmcli`
-* **Data Storage/Scraping:** Prometheus
-* **Data Visualization:** Grafana
-* **Version Control:** Git / GitHub
+*   **Hardware:**
+    *   Raspberry Pi Zero WH (Primary target)
+    *   Raspberry Pi 4 Model B (Development/Alternative)
+    *   MicroSD Cards (Minimum 16GB recommended)
+    *   Power Supplies
+    *   (Optional) Push Buttons and wiring for GPIO interaction
+*   **Operating System:** Custom Raspberry Pi OS image (potentially built using `pi-gen`)
+*   **Core Software:**
+    *   Python 3
+    *   `prometheus_client` (Python library)
+    *   `speedtest-cli` (Python library)
+    *   `RPi.GPIO` (Python library for button interaction)
+*   **Network Tools (Command Line):**
+    *   `ping`
+    *   `iwconfig` / `nmcli dev wifi rescan ` / `NetworkManager` (Wireless tools)
+    *   `ip` (from `iproute2` package)
+*   **Monitoring & Visualization:**
+    *   Prometheus (Exporter on Pi, Central Server for scraping/storage)
+    *   Grafana (Dashboard visualization, connected to Prometheus)
+*   **Version Control:** Git / GitHub
+*   **Collaboration:** Microsoft Teams, Discord, OneDrive/SharePoint
 
-## Hardware Requirements
 
-* Raspberry Pi (Zero WH or Pi 4 Model B recommended)
-* MicroSD Card (>= 16GB recommended, e.g., SanDisk Ultra 32GB)
-* Reliable Power Supply for the Raspberry Pi
+## Architecture Overview
+
+1.  **Data Collection (Raspberry Pi):**
+    *   A Python script (`main.py`) runs continuously on each Raspberry Pi.
+    *   It periodically executes network tests (`ping`, `speedtest-cli`, `iwconfig`, `nmcli dev wifi rescan`, `ip addr show`).
+    *   It parses the output of these commands to extract relevant metrics.
+    *   It reads GPIO pins to check for button presses (for ID reset).
+2.  **Metrics Exposure (Raspberry Pi):**
+    *   The Python script uses the `prometheus_client` library to expose the collected metrics via an HTTP endpoint (default: port 8000, `/metrics`).
+    *   A unique, persistent identifier is generated/loaded for each Pi and exposed as a label.
+3.  **Metrics Scraping (Central Server):**
+    *   A central Prometheus server is configured to periodically "scrape" the `/metrics` endpoint of each deployed Raspberry Pi.
+4.  **Storage & Querying (Central Server):**
+    *   Prometheus stores the scraped time-series data.
+5.  **Visualization (Central Server/Client):**
+    *   Grafana connects to the Prometheus server as a data source.
+    *   Dashboards are created in Grafana to query and visualize the network metrics over time, filterable by device identifier or location (if configured).
+
 
 ## Setup and Installation
 
