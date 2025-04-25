@@ -166,7 +166,7 @@ Once set up, the AeroScan Raspberry Pi node will automatically collect network d
 
 ## License
 
-AeroScan is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC-SA 4.0)**.
+AeroScan is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)**.
 
 You are free to **share** (copy and redistribute the material in any medium or format) and **adapt** (remix, transform, and build upon the material) under the following terms:
 
