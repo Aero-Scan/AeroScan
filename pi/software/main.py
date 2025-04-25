@@ -11,8 +11,7 @@ import base64
 # --- Configuration ---
 PROMETHEUS_PORT = 8000
 PING_TARGET = "1.1.1.1"
-WIRELESS_INTERFACE = "wlan0"  # Change if your wireless interface differs
-
+WIRELESS_INTERFACE = "wlan0"  # Wireless interface to be used
 # Button Pins (BCM numbering) - Connect each to GND via a button
 BUTTON_PIN_1 = 23
 BUTTON_PIN_2 = 24
