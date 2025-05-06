@@ -12,6 +12,17 @@ services:
     networks:
       - monitoring
 
+  pi-registrar:
+    container_name: pi-registrar
+    build: ./registrar # Path to the directory containing Dockerfile and api.py
+    ports:
+      # Expose port 5000 inside container to 5001 on the HOST machine
+      # Pis will target http://<docker_host_ip>:5001/register
+      - "5001:5000"
+    networks:
+      - monitoring
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
