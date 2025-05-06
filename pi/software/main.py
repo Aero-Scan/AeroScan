@@ -29,7 +29,7 @@ IDENTIFIER_FILE = "/var/local/network_monitor_identifier.txt"
 
 # --- HTTP Service Discovery Configuration ---
 # !!! IMPORTANT: CHANGE THIS to your Docker host's IP and the exposed port for the registrar !!!
-REGISTRAR_API_URL = "http://<YOUR_DOCKER_HOST_IP>:5001/register"
+REGISTRAR_API_URL = "http://10.51.33.17:5001/register"
 # How often to report to the API (in seconds) even if IP hasn't changed (acts as a heartbeat)
 API_REPORT_INTERVAL = 300 # Report every 5 minutes (adjust as needed)
 # --- End HTTP SD Configuration ---
