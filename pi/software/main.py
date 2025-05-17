@@ -30,8 +30,7 @@ REGISTRAR_CONFIG_FILE = "/var/local/network_monitor_registrar_url.txt"
 
 # --- HTTP Service Discovery Configuration ---
 # Default URL, will be overridden by REGISTRAR_CONFIG_FILE if it exists and is valid.
-# A warning will be printed if this remains a placeholder after attempting to load from file.
-REGISTRAR_API_URL = "http://<PLEASE_CONFIGURE_REGISTRAR_URL>:5001/register"
+REGISTRAR_API_URL = "http://default-registrar-host:5001/register" # A default, less alarming placeholder
 # How often to report to the API (in seconds) even if IP hasn't changed (acts as a heartbeat)
 API_REPORT_INTERVAL = 300 # Report every 5 minutes (adjust as needed)
 # --- End HTTP SD Configuration ---
@@ -421,53 +420,32 @@ def check_buttons():
 # --- Function for loading Registrar URL ---
 def load_and_set_registrar_url():
     """
-    Loads the registrar API URL from REGISTRAR_CONFIG_FILE.
-    If the file exists and contains a URL, it updates the global REGISTRAR_API_URL.
-    Prints warnings if the file is problematic or the final URL is a placeholder.
+    Attempts to load the registrar API URL from REGISTRAR_CONFIG_FILE.
+    If successful, updates the global REGISTRAR_API_URL.
+    Prints whether the configuration was loaded from file or if using the default.
     """
     global REGISTRAR_API_URL # To modify the global variable
 
-    # Check if the initial REGISTRAR_API_URL (from script default) is a placeholder
-    initial_url_is_placeholder = "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL
-
+    loaded_from_file = False
     if os.path.exists(REGISTRAR_CONFIG_FILE):
         try:
             with open(REGISTRAR_CONFIG_FILE, 'r') as f:
                 url_from_file = f.read().strip()
             if url_from_file:
-                # Only print if the URL actually changes from what was initially set or previously loaded
-                if url_from_file != REGISTRAR_API_URL:
-                    print(f"  Successfully loaded and updated REGISTRAR_API_URL from {REGISTRAR_CONFIG_FILE}: {url_from_file}")
-                else: # URL from file is same as current, still good to note it was loaded
-                    print(f"  Registrar URL from {REGISTRAR_CONFIG_FILE} matches current value: {url_from_file}")
-                REGISTRAR_API_URL = url_from_file # Update global
+                REGISTRAR_API_URL = url_from_file
+                loaded_from_file = True
             else:
-                # File exists but is empty
-                print(f"  Warning: Registrar URL file {REGISTRAR_CONFIG_FILE} is empty. REGISTRAR_API_URL remains: {REGISTRAR_API_URL}")
+                print(f"  Info: Registrar URL file '{REGISTRAR_CONFIG_FILE}' is empty.")
         except Exception as e:
-            # Error reading file
-            print(f"  Warning: Error reading registrar URL file {REGISTRAR_CONFIG_FILE}: {e}. REGISTRAR_API_URL remains: {REGISTRAR_API_URL}")
+            print(f"  Warning: Error reading registrar URL file '{REGISTRAR_CONFIG_FILE}': {e}")
     else:
-        # Config file does not exist
-        if initial_url_is_placeholder:
-            # If the script's default is a placeholder, inform that we're using it because the file is missing.
-            print(f"  Info: Registrar URL configuration file {REGISTRAR_CONFIG_FILE} not found. "
-                  f"Using script-defined default: {REGISTRAR_API_URL}")
-        # If REGISTRAR_API_URL was already a non-placeholder (e.g. hardcoded differently), no specific message needed here,
-        # as it means the script might have a valid hardcoded URL as a fallback.
+        print(f"  Info: Registrar URL configuration file '{REGISTRAR_CONFIG_FILE}' not found.")
 
-    # Final check: After attempting to load, is the URL still the placeholder?
-    if "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! CRITICAL WARNING: REGISTRAR_API_URL is not properly configured.        !!!")
-        print(f"!!! Script is currently using a placeholder value: {REGISTRAR_API_URL}     !!!")
-        print(f"!!! To resolve, create and fill the file: '{REGISTRAR_CONFIG_FILE}'        !!!")
-        print(f"!!! OR, if direct script modification is preferred, update the           !!!")
-        print(f"!!! 'REGISTRAR_API_URL' default value near the top of the script.        !!!")
-        print("!!! API reporting to the registrar service will likely FAIL until this     !!!")
-        print("!!! is correctly configured.                                               !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        time.sleep(5) # Give user time to see this critical warning
+    if loaded_from_file:
+        print(f"  Registrar API URL configured from file: {REGISTRAR_API_URL}")
+    else:
+        print(f"  Using default Registrar API URL: {REGISTRAR_API_URL}")
+        print(f"  (To customize, create and populate '{REGISTRAR_CONFIG_FILE}')")
 
 
 # --- Function for HTTP SD API Reporting ---
@@ -478,10 +456,6 @@ def report_ip_to_api(identifier, ip_address, port):
 
     if not identifier or not ip_address:
         print("  [API Report] Skipping API report: Missing identifier or IP.")
-        return False
-
-    if "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL:
-        print(f"  [API Report] Skipping API report: REGISTRAR_API_URL is not configured (current: {REGISTRAR_API_URL}).")
         return False
 
     api_endpoint = REGISTRAR_API_URL # Use the global, potentially updated URL
@@ -551,8 +525,8 @@ def main():
 
     # --- Load and Check REGISTRAR_API_URL Configuration ---
     print("--- Loading Registrar API URL Configuration ---")
-    load_and_set_registrar_url() # This function will print its own status and warnings
-    print("--- Registrar API URL Configuration Loaded ---")
+    load_and_set_registrar_url() # This function will print its own status
+    print("--- Registrar API URL Configuration Set ---")
 
     # --- Initialize timers ---
     now = time.time()
