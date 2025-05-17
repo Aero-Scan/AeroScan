@@ -1,5 +1,3 @@
-# Complete Python script for Raspberry Pi Network Monitor with HTTP SD Reporting
-
 import time
 import subprocess
 import re
@@ -26,10 +24,14 @@ SPEEDTEST_CHECK_INTERVAL = 60 # How often to start/check speedtest (seconds) - s
 
 # File to store the persistent identifier
 IDENTIFIER_FILE = "/var/local/network_monitor_identifier.txt"
+# File to store the registrar API URL
+REGISTRAR_CONFIG_FILE = "/var/local/network_monitor_registrar_url.txt"
+
 
 # --- HTTP Service Discovery Configuration ---
-# !!! IMPORTANT: CHANGE THIS to your Docker host's IP and the exposed port for the registrar !!!
-REGISTRAR_API_URL = "http://10.51.33.17:5001/register"
+# Default URL, will be overridden by REGISTRAR_CONFIG_FILE if it exists and is valid.
+# A warning will be printed if this remains a placeholder after attempting to load from file.
+REGISTRAR_API_URL = "http://<PLEASE_CONFIGURE_REGISTRAR_URL>:5001/register"
 # How often to report to the API (in seconds) even if IP hasn't changed (acts as a heartbeat)
 API_REPORT_INTERVAL = 300 # Report every 5 minutes (adjust as needed)
 # --- End HTTP SD Configuration ---
@@ -416,30 +418,86 @@ def check_buttons():
     except Exception as e: print(f"An unexpected error occurred during button check: {e}")
 
 
+# --- Function for loading Registrar URL ---
+def load_and_set_registrar_url():
+    """
+    Loads the registrar API URL from REGISTRAR_CONFIG_FILE.
+    If the file exists and contains a URL, it updates the global REGISTRAR_API_URL.
+    Prints warnings if the file is problematic or the final URL is a placeholder.
+    """
+    global REGISTRAR_API_URL # To modify the global variable
+
+    # Check if the initial REGISTRAR_API_URL (from script default) is a placeholder
+    initial_url_is_placeholder = "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL
+
+    if os.path.exists(REGISTRAR_CONFIG_FILE):
+        try:
+            with open(REGISTRAR_CONFIG_FILE, 'r') as f:
+                url_from_file = f.read().strip()
+            if url_from_file:
+                # Only print if the URL actually changes from what was initially set or previously loaded
+                if url_from_file != REGISTRAR_API_URL:
+                    print(f"  Successfully loaded and updated REGISTRAR_API_URL from {REGISTRAR_CONFIG_FILE}: {url_from_file}")
+                else: # URL from file is same as current, still good to note it was loaded
+                    print(f"  Registrar URL from {REGISTRAR_CONFIG_FILE} matches current value: {url_from_file}")
+                REGISTRAR_API_URL = url_from_file # Update global
+            else:
+                # File exists but is empty
+                print(f"  Warning: Registrar URL file {REGISTRAR_CONFIG_FILE} is empty. REGISTRAR_API_URL remains: {REGISTRAR_API_URL}")
+        except Exception as e:
+            # Error reading file
+            print(f"  Warning: Error reading registrar URL file {REGISTRAR_CONFIG_FILE}: {e}. REGISTRAR_API_URL remains: {REGISTRAR_API_URL}")
+    else:
+        # Config file does not exist
+        if initial_url_is_placeholder:
+            # If the script's default is a placeholder, inform that we're using it because the file is missing.
+            print(f"  Info: Registrar URL configuration file {REGISTRAR_CONFIG_FILE} not found. "
+                  f"Using script-defined default: {REGISTRAR_API_URL}")
+        # If REGISTRAR_API_URL was already a non-placeholder (e.g. hardcoded differently), no specific message needed here,
+        # as it means the script might have a valid hardcoded URL as a fallback.
+
+    # Final check: After attempting to load, is the URL still the placeholder?
+    if "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL:
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("!!! CRITICAL WARNING: REGISTRAR_API_URL is not properly configured.        !!!")
+        print(f"!!! Script is currently using a placeholder value: {REGISTRAR_API_URL}     !!!")
+        print(f"!!! To resolve, create and fill the file: '{REGISTRAR_CONFIG_FILE}'        !!!")
+        print(f"!!! OR, if direct script modification is preferred, update the           !!!")
+        print(f"!!! 'REGISTRAR_API_URL' default value near the top of the script.        !!!")
+        print("!!! API reporting to the registrar service will likely FAIL until this     !!!")
+        print("!!! is correctly configured.                                               !!!")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        time.sleep(5) # Give user time to see this critical warning
+
+
 # --- Function for HTTP SD API Reporting ---
 def report_ip_to_api(identifier, ip_address, port):
     """Sends this Pi's details to the registration API."""
     global last_reported_ip_for_api
+    # REGISTRAR_API_URL is now a global updated by load_and_set_registrar_url()
 
     if not identifier or not ip_address:
         print("  [API Report] Skipping API report: Missing identifier or IP.")
-        return False # Indicate failure/skip
+        return False
 
-    # Use the configured URL
-    api_endpoint = REGISTRAR_API_URL
+    if "<PLEASE_CONFIGURE_REGISTRAR_URL>" in REGISTRAR_API_URL:
+        print(f"  [API Report] Skipping API report: REGISTRAR_API_URL is not configured (current: {REGISTRAR_API_URL}).")
+        return False
+
+    api_endpoint = REGISTRAR_API_URL # Use the global, potentially updated URL
 
     payload = {
         "identifier": identifier,
         "ip": ip_address,
-        "port": port # Send the port the exporter is running on
+        "port": port
     }
     try:
         print(f"  [API Report] Attempting to report to {api_endpoint} with payload: {payload}")
-        response = requests.post(api_endpoint, json=payload, timeout=10) # 10 second timeout
-        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+        response = requests.post(api_endpoint, json=payload, timeout=10)
+        response.raise_for_status()
         print(f"  [API Report] Successfully reported IP {ip_address} for {identifier} (Status: {response.status_code}).")
-        last_reported_ip_for_api = ip_address # Update last reported IP only on success
-        return True # Indicate success
+        last_reported_ip_for_api = ip_address
+        return True
 
     except requests.exceptions.Timeout:
         print(f"  [API Report] ERROR: Timeout connecting to API at {api_endpoint}")
@@ -450,15 +508,14 @@ def report_ip_to_api(identifier, ip_address, port):
     except requests.exceptions.RequestException as e:
         print(f"  [API Report] ERROR: General failure reporting IP to API at {api_endpoint}: {e}")
 
-    return False # Indicate failure
+    return False
 # --- End HTTP SD Function ---
 
 
 # --- Main Execution ---
 def main():
     global last_check_times, speedtest_process, speedtest_queue
-    # Add HTTP SD globals to main scope
-    global last_api_report_time, last_reported_ip_for_api
+    global last_api_report_time, last_reported_ip_for_api # Already global
 
     # --- Initial checks ---
     if os.geteuid() != 0:
@@ -466,12 +523,10 @@ def main():
         time.sleep(2)
     if subprocess.run(["which", "ip"], capture_output=True).returncode != 0:
         print("Error: 'ip' command not found. Please install 'iproute2' (e.g., sudo apt install iproute2).")
-        # return # Optionally exit
     if subprocess.run(["which", "iwconfig"], capture_output=True).returncode != 0:
         print("Warning: 'iwconfig' command not found. Wireless metrics unavailable. Install 'wireless-tools'.")
     if subprocess.run(["which", "iwlist"], capture_output=True).returncode != 0:
         print("Warning: 'iwlist' command not found. WiFi AP scan unavailable. Install 'wireless-tools'.")
-
 
     # --- Start Prometheus server ---
     try:
@@ -487,31 +542,23 @@ def main():
 
     # --- Initial Identifier ---
     print("--- Initializing Device Identifier ---")
-    # Try load first, if fails or empty, generate new, save, then update Prometheus
     initial_id = load_identifier()
     if not initial_id:
         initial_id = generate_new_identifier()
-        save_identifier(initial_id) # Save the newly generated one
-    update_prometheus_identifier(initial_id) # Update Prometheus gauge with loaded/new ID
+        save_identifier(initial_id)
+    update_prometheus_identifier(initial_id)
     print("--- Device Identifier Initialized ---")
 
+    # --- Load and Check REGISTRAR_API_URL Configuration ---
+    print("--- Loading Registrar API URL Configuration ---")
+    load_and_set_registrar_url() # This function will print its own status and warnings
+    print("--- Registrar API URL Configuration Loaded ---")
 
     # --- Initialize timers ---
     now = time.time()
-    # Stagger initial checks slightly by setting last check time further in the past
-    last_check_times["ping_scan_ip"] = now - PING_SCAN_IP_INTERVAL - 5 # Force initial run soon
-    last_check_times["speedtest"] = now - SPEEDTEST_CHECK_INTERVAL - 10 # Force initial run slightly later
-    last_api_report_time = 0 # Force initial API report attempt immediately after first IP check
-
-    # --- Check REGISTRAR_API_URL Configuration ---
-    if "<YOUR_DOCKER_HOST_IP>" in REGISTRAR_API_URL:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! ERROR: REGISTRAR_API_URL is not configured in the script.      !!!")
-        print(f"!!! Please edit the script near line 40 and set the correct IP   !!!")
-        print("!!! Currently set to:", REGISTRAR_API_URL, "                       !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        time.sleep(10) # Give user time to see the error before continuing
-
+    last_check_times["ping_scan_ip"] = now - PING_SCAN_IP_INTERVAL - 5
+    last_check_times["speedtest"] = now - SPEEDTEST_CHECK_INTERVAL - 10
+    last_api_report_time = 0
 
     # --- Main Loop ---
     print("--- Starting Monitoring Loop ---")
@@ -519,119 +566,89 @@ def main():
         while True:
             current_time = time.time()
 
-            # --- Check Buttons (runs every loop) ---
             if gpio_ok: check_buttons()
 
-            # --- Scheduled Network/Scan/IP Checks ---
             if current_time - last_check_times["ping_scan_ip"] >= PING_SCAN_IP_INTERVAL:
                 print(f"\n--- Running Scheduled Checks (Interval: {PING_SCAN_IP_INTERVAL}s) ---")
                 run_ping_checks()
                 update_wireless_metrics(WIRELESS_INTERFACE)
                 scan_wifi_aps(WIRELESS_INTERFACE)
-                update_device_ip(WIRELESS_INTERFACE) # This updates current_ip_labels
+                update_device_ip(WIRELESS_INTERFACE)
                 last_check_times["ping_scan_ip"] = current_time
                 print("--- Scheduled Checks Complete ---")
 
-            # --- Periodic API Report ---
-            # Get the *current* values from the global variables updated by other functions
             current_ip = current_ip_labels.get(WIRELESS_INTERFACE)
             identifier = current_device_id_label
-
-            # Conditions to trigger an API report:
-            # 1. We have an IP and an Identifier.
-            # 2. AND ( The IP is different from the last *successfully reported* IP OR
-            #          Enough time has passed since the last *attempted* report )
             ip_changed = (current_ip is not None and current_ip != last_reported_ip_for_api)
             time_to_report = (current_time - last_api_report_time >= API_REPORT_INTERVAL)
 
             if identifier and current_ip and (ip_changed or time_to_report):
                  print(f"\n--- Reporting to Registration API (Reason: {'IP Changed' if ip_changed else 'Periodic Update'}) ---")
-                 # Attempt to report
                  report_ip_to_api(identifier, current_ip, PROMETHEUS_PORT)
-                 # Always update the last *attempt* time, regardless of success,
-                 # to ensure periodic retries/heartbeats
                  last_api_report_time = current_time
                  print("--- API Report Attempt Complete ---")
 
-
-            # --- Scheduled Speedtest Start ---
-            # Run only if a speedtest is not already in progress
             if current_time - last_check_times["speedtest"] >= SPEEDTEST_CHECK_INTERVAL:
                 if speedtest_process is None:
                     print(f"\n--- Starting New Speedtest (Interval: {SPEEDTEST_CHECK_INTERVAL}s) ---")
                     speedtest_queue = multiprocessing.Queue()
-                    # Make the child process a daemon so it doesn't block main exit
                     speedtest_process = multiprocessing.Process(target=run_speedtest_child, args=(speedtest_queue,), daemon=True)
                     speedtest_process.start()
-                    last_check_times["speedtest"] = current_time # Record start time
-                # else: print(f"({time.strftime('%H:%M:%S')}) Speedtest interval elapsed, but previous test still running.")
+                    last_check_times["speedtest"] = current_time
 
-
-            # --- Check for Speedtest Results (runs frequently) ---
             if speedtest_queue is not None:
                 try:
-                    result = speedtest_queue.get_nowait() # Non-blocking check
+                    result = speedtest_queue.get_nowait()
                     print("\n--- Processing Speedtest Results ---")
-                    SPEEDTEST_PING.set(result.get('ping', -1)) # Use .get for safety
+                    SPEEDTEST_PING.set(result.get('ping', -1))
                     DOWNLOAD_SPEED.set(result.get('download', -1))
                     UPLOAD_SPEED.set(result.get('upload', -1))
-                    # Clean up the finished process
                     if speedtest_process is not None:
-                        speedtest_process.join(timeout=0.5) # Give it a moment to exit cleanly
+                        speedtest_process.join(timeout=0.5)
                         if speedtest_process.is_alive():
                              print("  Warning: Speedtest process did not exit cleanly after result, terminating.")
                              speedtest_process.terminate()
-                             speedtest_process.join(timeout=1) # Wait for termination
-                    # Reset state
+                             speedtest_process.join(timeout=1)
                     speedtest_process = None
                     if speedtest_queue:
                         speedtest_queue.close()
-                        try: speedtest_queue.join_thread() # Ensure queue feeder thread exits
+                        try: speedtest_queue.join_thread()
                         except Exception: pass
                     speedtest_queue = None
                     print("--- Speedtest Results Processed ---")
-
                 except multiprocessing.queues.Empty:
-                    # Queue is empty, check if the process died unexpectedly
                     if speedtest_process and not speedtest_process.is_alive():
                          print("\n--- Speedtest process ended unexpectedly without result ---")
                          print(f"  Exit code: {speedtest_process.exitcode}")
-                         speedtest_process.join(timeout=0) # Ensure resources are released
+                         speedtest_process.join(timeout=0)
                          speedtest_process = None; speedtest_queue = None
-                         # Set metrics to error state
                          SPEEDTEST_PING.set(-1); DOWNLOAD_SPEED.set(-1); UPLOAD_SPEED.set(-1)
-
-                except Exception as e: # Catch other potential queue errors
+                except Exception as e:
                     print(f"\n--- Error processing speedtest queue: {e} ---")
                     if speedtest_process and speedtest_process.is_alive():
                         print("  Terminating running speedtest process due to queue error.")
                         speedtest_process.terminate(); speedtest_process.join(timeout=1)
                     speedtest_process = None; speedtest_queue = None
-                    # Set metrics to error state
                     SPEEDTEST_PING.set(-1); DOWNLOAD_SPEED.set(-1); UPLOAD_SPEED.set(-1)
 
-
-            # --- Main Loop Sleep ---
             time.sleep(LOOP_SLEEP_INTERVAL)
 
     except KeyboardInterrupt:
         print("\nShutdown requested via KeyboardInterrupt.")
     except Exception as e:
-        print(f"\nFATAL ERROR in main loop: {e}") # Catch unexpected errors
+        print(f"\nFATAL ERROR in main loop: {e}")
         import traceback
-        traceback.print_exc() # Print stack trace for debugging
+        traceback.print_exc()
     finally:
         print("--- Initiating Shutdown Sequence ---")
-        # No specific cleanup needed for API reporting, API handles timeouts
         if speedtest_process and speedtest_process.is_alive():
             print("Terminating active speedtest process...")
             speedtest_process.terminate()
-            speedtest_process.join(timeout=2) # Wait a bit for termination
+            speedtest_process.join(timeout=2)
         if gpio_ok:
             print("Cleaning up GPIO...")
             GPIO.cleanup()
         print("--- Shutdown Complete ---")
 
-
 if __name__ == '__main__':
-    main() # Run the main function
+    main()
