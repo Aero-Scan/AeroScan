@@ -1,0 +1,3 @@
+.env
+Docker/config/certs/
+Docker/config/prometheus_certs/
