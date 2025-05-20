@@ -301,4 +301,3 @@ You are free to **share** (copy and redistribute the material in any medium or f
 
 For more information, see the [full license text](LICENSE) in this repository or visit:
 [https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-```
