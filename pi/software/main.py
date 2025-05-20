@@ -250,8 +250,8 @@ def parse_nmcli_wifi_line(line_content, header_map):
     parts = re.split(r'\s{2,}', line_content.strip())
 
     # Debug: Print what's being processed
-    # print(f"  DEBUG parse_nmcli_wifi_line: Parts after split: {parts} for line: '{line_content}'")
-    # print(f"  DEBUG parse_nmcli_wifi_line: Using header_map: {header_map}")
+    print(f"  DEBUG parse_nmcli_wifi_line: Parts after split: {parts} for line: '{line_content}'")
+    print(f"  DEBUG parse_nmcli_wifi_line: Using header_map: {header_map}")
 
 
     try:
@@ -323,7 +323,7 @@ def get_nmcli_header_map(header_line_content):
         if clean_name:
              header_map[clean_name] = i + current_index_offset # Adjust index if IN-USE was present
 
-    # print(f"  DEBUG get_nmcli_header_map: Raw Headers: {headers_raw}, Processed Headers: {processed_headers}, Final Map: {header_map}")
+    print(f"  DEBUG get_nmcli_header_map: Raw Headers: {headers_raw}, Processed Headers: {processed_headers}, Final Map: {header_map}")
 
     required_data_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"]
     missing = [h for h in required_data_headers if h not in header_map]
@@ -391,7 +391,7 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
             # The crucial part is that `parse_nmcli_wifi_line` now correctly uses the indices
             # from `header_map` to access the correct elements in `parts`.
 
-            # print(f"  DEBUG scan_wifi_aps_nmcli: Processing data line {line_idx + data_lines_start_index}: '{line_content}'")
+            print(f"  DEBUG scan_wifi_aps_nmcli: Processing data line {line_idx + data_lines_start_index}: '{line_content}'")
             ap_data = parse_nmcli_wifi_line(line_content, header_map)
             if ap_data:
                 aps.append(ap_data)
