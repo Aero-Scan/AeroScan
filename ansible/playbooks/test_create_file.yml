@@ -1,7 +1,7 @@
 ---
 - name: Test Ansible Connectivity and File Creation
   hosts: pis # Targets the 'pis' group from your dynamic inventory
-  gather_facts: false # We don't need to gather facts for this simple test
+  gather_facts: true
 
   # vars: # You can define variables here if needed for the filename or content
   #   test_file_path: "/tmp/ansible_test_file.txt" # Path on the Raspberry Pi
