@@ -6,10 +6,10 @@ echo "--- AeroScan Server Setup ---"
 
 # Define paths relative to the Docker directory
 DOCKER_DIR="./Docker"
-CONFIG_DIR="${DOCKER_DIR}/config" # General config dir
+CONFIG_DIR="${DOCKER_DIR}/config"
 CERTS_DIR="${CONFIG_DIR}/certs"
 PROM_CERTS_DIR="${CONFIG_DIR}/prometheus_certs"
-ENV_FILE=".env" # In project root, next to docker-compose.yml
+ENV_FILE="${DOCKER_DIR}/.env"
 
 # Create directories if they don't exist
 mkdir -p "${CERTS_DIR}"
