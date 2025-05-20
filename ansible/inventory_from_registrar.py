@@ -113,20 +113,22 @@ if __name__ == "__main__":
     parser.add_argument('--host', type=str, help="Get all variables about a specific host")
     args = parser.parse_args()
 
-    inventory_to_print = {}
     if args.list:
         inventory_to_print = get_inventory_from_targets()
+        print(json.dumps(inventory_to_print, indent=4))
     elif args.host:
-        # Ansible expects host specific vars. If your _meta hostvars is populated
-        # by the --list call (which it is), Ansible handles it.
-        # Otherwise, you could call get_inventory_from_targets() and extract here.
-        # For simplicity, if --list isn't called, we don't fetch.
-        # Ansible typically calls with --list first.
-        inventory_to_print = {} # Or just {"_meta": {"hostvars": {}}}
+        # Ansible expects host-specific vars if it calls with --host.
+        # For this dynamic inventory, all hostvars are typically in _meta from --list.
+        # So, returning an empty JSON object for a single host call is usually fine,
+        # as Ansible will merge it with what it got from _meta.
+        print(json.dumps({})) # Or {"_meta": {"hostvars": {args.host: {}}}} if you want to be more specific
     else:
-        # Default behavior if no valid Ansible flags are passed.
-        # You could print usage or just an empty valid JSON.
-        inventory_to_print = {"_meta": {"hostvars": {}}}
-
-
-    print(json.dumps(inventory_to_print, indent=4))
+        # If called without --list or --host, it's likely an Ansible probe.
+        # Exit gracefully without printing JSON that could be misinterpreted as a full, empty inventory.
+        # Or, some inventory systems expect an empty JSON object {} in this case.
+        # Let's try exiting, as Ansible's script plugin primarily cares about --list.
+        # If Ansible's 'auto' plugin has issues with no output, then print an empty JSON object.
+        # Forcing an error or no output here might make Ansible correctly identify it as a script needing --list.
+        # A common practice is to return an empty JSON object if no arguments are matched.
+        print(json.dumps({})) # Outputting an empty JSON object is safer for auto-detection
+        sys.exit(0)
