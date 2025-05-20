@@ -4,6 +4,8 @@ services:
     container_name: prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      # Cert for Prometheus to trust pi-registrar (public cert of pi-registrar)
+      - ./config/prometheus_certs/pi_registrar_server_public_cert.pem:/etc/prometheus/certs/pi_registrar_server_public_cert.pem:ro
       - prometheus_data:/prometheus
     ports:
       - "9090:9090"
@@ -11,14 +13,20 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
     networks:
       - monitoring
+    restart: unless-stopped
 
   pi-registrar:
     container_name: pi-registrar
     build: ./registrar # Path to the directory containing Dockerfile and api.py
     ports:
-      # Expose port 5000 inside container to 5001 on the HOST machine
-      # Pis will target http://<docker_host_ip>:5001/register
+      # Expose container's HTTPS port 5000 to host port 5001
       - "5001:5000"
+    volumes:
+      # pi-registrar's own SSL certs (cert.pem and key.pem)
+      - ./config/certs:/certs:ro
+    environment:
+      # Loaded from .env file in the project root
+      PI_REGISTER_API_KEY: ${PI_REGISTER_API_KEY}
     networks:
       - monitoring
     restart: unless-stopped
@@ -34,6 +42,7 @@ services:
       - grafana_data:/var/lib/grafana
     networks:
       - monitoring
+    restart: unless-stopped
 
 volumes:
   prometheus_data:

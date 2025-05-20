@@ -10,30 +10,49 @@ import RPi.GPIO as GPIO
 import os
 import base64
 import requests # For HTTP API reporting
+import urllib3 # To potentially suppress InsecureRequestWarning if verify=False
 
 # --- Configuration ---
-PROMETHEUS_PORT = 8000 # Port the script's own /metrics endpoint runs on
+PROMETHEUS_PORT = 8000
 PING_TARGET = "1.1.1.1"
-WIRELESS_INTERFACE = "wlan0"  # Wireless interface to check IP for and monitor
-# Button Pins (BCM numbering) - Connect each to GND via a button
+# Primary wireless interface
+WIRELESS_INTERFACE = "wlan0"
+# Primary LAN interface, set to None if not used or to be ignored
+LAN_INTERFACE = "eth0"
 BUTTON_PIN_1 = 23
 BUTTON_PIN_2 = 24
 
-# Intervals
-LOOP_SLEEP_INTERVAL = 0.1 # Main loop check frequency (seconds)
-PING_SCAN_IP_INTERVAL = 30   # How often to run ping, scan, wireless metrics, IP check (seconds)
-SPEEDTEST_CHECK_INTERVAL = 60 # How often to start/check speedtest (seconds) - should be >= PING_SCAN_IP_INTERVAL
+LOOP_SLEEP_INTERVAL = 0.1
+# How often to run ping, scan, wireless metrics, IP check (seconds)
+PING_SCAN_IP_INTERVAL = 30
+# How often to start/check speedtest (seconds)
+SPEEDTEST_CHECK_INTERVAL = 60
 
-# File to store the persistent identifier
+# Files for persistent data and configuration
 IDENTIFIER_FILE = "/var/local/network_monitor_identifier.txt"
+# Should contain full URL e.g. https://server:5001/register
+REGISTRAR_CONFIG_FILE = "/var/local/network_monitor_registrar_url.txt"
+# Should contain the shared API key
+API_KEY_FILE = "/var/local/network_monitor_api_key.txt"
 
-# --- HTTP Service Discovery Configuration ---
-# !!! IMPORTANT: CHANGE THIS to your Docker host's IP and the exposed port for the registrar !!!
-REGISTRAR_API_URL = "http://10.51.33.17:5001/register"
-# How often to report to the API (in seconds) even if IP hasn't changed (acts as a heartbeat)
-API_REPORT_INTERVAL = 300 # Report every 5 minutes (adjust as needed)
-# --- End HTTP SD Configuration ---
+# Default Registrar URL (will be overridden by REGISTRAR_CONFIG_FILE)
+DEFAULT_REGISTRAR_API_URL = "https://PLEASE_CONFIGURE_IN_FILE:5001/register"
+# Initialize with default
+REGISTRAR_API_URL = DEFAULT_REGISTRAR_API_URL
 
+# Path to the server's public certificate on the Pi (for HTTPS verification)
+SERVER_CERT_PATH_ON_PI = "/etc/ssl/certs/pi_registrar_server.pem"
+
+# Report to registrar every 5 minutes (heartbeat)
+API_REPORT_INTERVAL = 300
+
+# Flags to control interface binding for tests
+PING_THROUGH_WIFI_ONLY = True
+SPEEDTEST_THROUGH_WIFI_ONLY = True
+
+# --- Global variable for Pi's API Key ---
+# Will be loaded from API_KEY_FILE
+PI_SHARED_API_KEY = None
 
 # --- Prometheus Gauges ---
 PING_RESPONSE_TIME = Gauge('network_ping_response_time_ms', 'Ping response time in ms (first packet)')
@@ -41,105 +60,114 @@ NETWORK_TTL = Gauge('network_ttl', 'Ping TTL value (first packet)')
 SPEEDTEST_PING = Gauge('speedtest_ping_ms', 'Speedtest ping in ms')
 DOWNLOAD_SPEED = Gauge('download_speed_mbps', 'Download speed in Mbps')
 UPLOAD_SPEED = Gauge('upload_speed_mbps', 'Upload speed in Mbps')
-SIGNAL_STRENGTH = Gauge('signal_strength_dbm', 'Signal strength of connected network in dBm')
+# Signal strength of connected network in dBm (via iwconfig)
+SIGNAL_STRENGTH = Gauge('signal_strength_dbm', 'Signal strength of connected network in dBm (via iwconfig)')
 NETWORK_JITTER = Gauge('network_jitter_ms', 'Network jitter in ms (calculated from 5 packets)')
-LINK_QUALITY = Gauge('link_quality_percentage', 'Link quality of connected network in percentage')
-WIFI_AP_SIGNAL = Gauge('wifi_ap_signal_strength_dbm', 'Signal strength of nearby WiFi APs', ['ssid', 'bssid', 'channel'])
+# Link quality of connected network in percentage (via iwconfig)
+LINK_QUALITY = Gauge('link_quality_percentage', 'Link quality of connected network in percentage (via iwconfig)')
+# Signal strength of nearby WiFi APs (via nmcli)
+WIFI_AP_SIGNAL = Gauge('wifi_ap_signal_strength_dbm', 'Signal strength of nearby WiFi APs (via nmcli)', ['ssid', 'bssid', 'channel'])
 DEVICE_IDENTIFIER = Gauge('device_unique_identifier', 'Unique identifier for the device (SN-Base64Timestamp)', ['identifier'])
 NETWORK_INTERFACE_INFO = Gauge('network_interface_info', 'Basic network interface information (IP Address)', ['interface', 'ip_address'])
-# --- End Prometheus Gauges ---
 
 # --- Global Variables ---
 current_device_id_label = None
 raspberry_pi_serial = None
 buttons_currently_pressed = False
-last_check_times = {
-    "ping_scan_ip": 0,
-    "speedtest": 0,
-}
+last_check_times = { "ping_scan_ip": 0, "speedtest": 0 }
 speedtest_process = None
 speedtest_queue = None
-# Dictionary to store current IP labels {interface: ip_address_string}
+# Stores {interface_name: ip_address}
 current_ip_labels = {}
-
-# --- Global variables for HTTP SD ---
 last_api_report_time = 0
-last_reported_ip_for_api = None # Track last reported IP to avoid spamming API if IP is stable
-# --- End Global Variables ---
+# Tracks the IP last successfully reported to the registrar
+last_reported_ip_for_api = None
 
+# --- Network Metric Functions ---
+def get_ip_address_for_interface(interface_name):
+    """Helper function to get current IPv4 for a specific interface."""
+    if not interface_name:
+        return None
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show", interface_name],
+            capture_output=True, text=True, check=True, timeout=2
+        )
+        ip_match = re.search(r"inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/", result.stdout)
+        if ip_match:
+            return ip_match.group(1)
+    except Exception as e:
+        # Less verbose for a helper
+        print(f"  Could not get IP for {interface_name}: {e}")
+    return None
 
-# --- Functions for Network Metrics ---
-
-def run_ping_checks(target=PING_TARGET):
-    """
-    Run ping with 5 packets to get first packet RTT, TTL, and calculate jitter.
-    Updates PING_RESPONSE_TIME, NETWORK_TTL, and NETWORK_JITTER gauges.
-    """
+def run_ping_checks(target=PING_TARGET, interface_to_use=None):
     response_time = -1
     ttl = -1
     jitter = -1
-    print(f"Running ping checks to {target}...")
+
+    ping_cmd_base = ["ping", "-c", "5", "-w", "5", target]
+    # For logging
+    ping_cmd_display = " ".join(ping_cmd_base)
+
+    if interface_to_use:
+        print(f"Running ping checks to {target} via interface {interface_to_use}...")
+        ping_cmd = ["ping", "-I", interface_to_use, "-c", "5", "-w", "5", target]
+        ping_cmd_display = " ".join(ping_cmd)
+    else:
+        print(f"Running ping checks to {target} (default interface)...")
+        ping_cmd = ping_cmd_base
 
     try:
-        result = subprocess.run(
-            ["ping", "-c", "5", "-w", "5", target], # 5 packets, 5 second overall timeout
-            capture_output=True,
-            text=True,
-            check=True, # Raises error on non-zero exit (e.g., host unreachable)
-            timeout=6 # Slightly longer subprocess timeout
-        )
+        result = subprocess.run(ping_cmd, capture_output=True, text=True, check=True, timeout=6)
         output = result.stdout
         times_matches = re.findall(r"time=([\d\.]+)", output)
         ttl_matches = re.findall(r"ttl=(\d+)", output)
         times = list(map(float, times_matches))
-
         if times:
             response_time = times[0]
+            # TTL might not be in all ping replies (e.g., first can be from gateway)
             if ttl_matches:
                 ttl = int(ttl_matches[0])
-            print(f"  Ping First Reply: RTT={response_time:.2f} ms, TTL={ttl if ttl != -1 else 'N/A'}")
         else:
-            print("  Ping: No replies received.")
+            print(f"  Ping ({ping_cmd_display}): No replies received.")
 
         if len(times) >= 2:
             diffs = [abs(times[i+1] - times[i]) for i in range(len(times) - 1)]
             jitter = sum(diffs) / len(diffs)
-            print(f"  Ping Jitter: {jitter:.2f} ms (from {len(times)} replies)")
         elif len(times) == 1:
+            # Jitter is 0 if only one reply
             jitter = 0
-            print("  Ping Jitter: 0 ms (only 1 reply)")
-        else:
-             print("  Ping Jitter: N/A (no replies)")
-
-    except subprocess.TimeoutExpired:
-        print(f"  Ping command timed out for {target}")
     except subprocess.CalledProcessError as e:
-        output = e.stdout + e.stderr
-        times_matches = re.findall(r"time=([\d\.]+)", output)
-        ttl_matches = re.findall(r"ttl=(\d+)", output)
-        times = list(map(float, times_matches))
-        if times:
-             response_time = times[0]; ttl = int(ttl_matches[0]) if ttl_matches else -1
-             if len(times) >= 2: diffs = [abs(times[i+1] - times[i]) for i in range(len(times) - 1)]; jitter = sum(diffs) / len(diffs)
-             elif len(times) == 1: jitter = 0
-        print(f"  Ping command failed for {target} (Exit code: {e.returncode}). Partial data? RTT={response_time}, TTL={ttl}, Jitter={jitter}. Error: {e.stderr.strip()}")
+        error_detail = e.stderr.strip() if e.stderr else e.stdout.strip()
+        if interface_to_use and "Cannot assign requested address" in error_detail:
+            print(f"  Ping error for {target} via {interface_to_use}: Interface likely has no IP or route. {error_detail}")
+        else:
+            print(f"  Ping error for {target} (cmd: {ping_cmd_display}): {e}. Output: {error_detail}")
+    except subprocess.TimeoutExpired:
+        print(f"  Ping command timed out for {target} (cmd: {ping_cmd_display})")
+    except FileNotFoundError:
+        print("  Error: 'ping' command not found.")
     except Exception as e:
-        print(f"  Error in run_ping_checks: {e}")
+        print(f"  Unexpected error in run_ping_checks (cmd: {ping_cmd_display}): {e}")
 
     PING_RESPONSE_TIME.set(response_time)
     NETWORK_TTL.set(ttl)
     NETWORK_JITTER.set(jitter)
 
 def update_wireless_metrics(interface=WIRELESS_INTERFACE):
-    """
-    Update connected wireless metrics (signal strength and link quality) using iwconfig.
-    """
-    signal_level = -1
+    # Default to very low signal if not found
+    signal_level = -100
     quality_percentage = -1
-    print(f"Checking wireless metrics for {interface}...")
+    # No wireless interface configured
+    if not interface:
+        return
+
+    print(f"Checking connected wireless metrics for {interface} (iwconfig)...")
     try:
         result = subprocess.run(
-            ["iwconfig", interface], capture_output=True, text=True, check=True, timeout=5
+            ["iwconfig", interface],
+            capture_output=True, text=True, check=True, timeout=5
         )
         output = result.stdout
         link_quality_match = re.search(r"Link Quality=(\d+)/(\d+)", output)
@@ -147,153 +175,268 @@ def update_wireless_metrics(interface=WIRELESS_INTERFACE):
             q_curr, q_max = map(int, link_quality_match.groups())
             quality_percentage = (q_curr / q_max * 100) if q_max > 0 else 0
         signal_level_match = re.search(r"Signal level=(-?\d+)\s*dBm", output)
-        if signal_level_match: signal_level = int(signal_level_match.group(1))
+        if signal_level_match:
+            signal_level = int(signal_level_match.group(1))
+        # Interface might not be wireless or not connected
+        elif "Signal level" not in output:
+            print(f"  No 'Signal level' found for {interface}. Is it a connected wireless interface?")
 
-        print(f"  Wireless Metrics: Signal={signal_level if signal_level != -1 else 'N/A'} dBm, Quality={quality_percentage:.1f}%" if quality_percentage != -1 else 'N/A')
-    except subprocess.TimeoutExpired: print(f"  iwconfig command timed out for {interface}")
-    except subprocess.CalledProcessError: print(f"  Failed to get wireless metrics for {interface} (is it up and wireless?).")
-    except FileNotFoundError: print("  Error: 'iwconfig' command not found. Is 'wireless-tools' installed?")
-    except Exception as e: print(f"  Error in update_wireless_metrics: {e}")
+    except subprocess.CalledProcessError:
+        print(f"  Failed to get iwconfig metrics for {interface} (is it up and wireless?).")
+    except subprocess.TimeoutExpired:
+        print(f"  iwconfig command timed out for {interface}")
+    except FileNotFoundError:
+        print("  Error: 'iwconfig' command not found. Is 'wireless-tools' installed?")
+    except Exception as e:
+        print(f"  Unexpected error in update_wireless_metrics for {interface}: {e}")
 
     LINK_QUALITY.set(quality_percentage)
     SIGNAL_STRENGTH.set(signal_level)
 
-def run_speedtest_child(result_queue):
-    """
-    Child process function that runs the speedtest. Puts results in queue.
-    """
+def run_speedtest_child(result_queue, interface_to_use_for_source_ip=None):
     result_data = {'ping': -1, 'download': -1, 'upload': -1}
+    source_ip = None
+
+    if interface_to_use_for_source_ip:
+        print(f"  Attempting speedtest via interface {interface_to_use_for_source_ip}...")
+        source_ip = get_ip_address_for_interface(interface_to_use_for_source_ip)
+        if not source_ip:
+            print(f"  Warning: Could not get IP for interface {interface_to_use_for_source_ip}. Speedtest will use default IP or may fail.")
+        else:
+            print(f"  Using source IP {source_ip} (from {interface_to_use_for_source_ip}) for speedtest.")
+    else:
+        print("  Attempting speedtest using default OS IP selection...")
+
+
     try:
         print("  Starting speedtest process...")
-        st = speedtest.Speedtest(secure=True)
-        st.get_best_server() # Can fail
-        d_bps = st.download() # Can fail
-        u_bps = st.upload() # Can fail
+        # HTTPS for speedtest.net communication
+        st_args = {"secure": True}
+        if source_ip:
+            st_args["source_address"] = source_ip
+
+        st = speedtest.Speedtest(**st_args)
+        st.get_best_server()
+        d_bps = st.download()
+        u_bps = st.upload()
         result_data['download'] = d_bps / 1e6 if d_bps is not None else -1
         result_data['upload'] = u_bps / 1e6 if u_bps is not None else -1
         results_dict = st.results.dict()
+        # Ping from speedtest server
         result_data['ping'] = results_dict.get('ping', -1)
-        print(f"  Speedtest Finished: Ping={result_data['ping']:.2f} ms, Download={result_data['download']:.2f} Mbps, Upload={result_data['upload']:.2f} Mbps")
-    except speedtest.SpeedtestException as e: print(f"  Speedtest failed: {e}") # Catch specific speedtest errors
-    except Exception as e: print(f"  Speedtest process failed unexpectedly: {e}") # Catch other errors
-    finally: result_queue.put(result_data) # Always put a result
+        print(f"  Speedtest Finished (Source IP used: {source_ip if source_ip else 'Default OS choice'}): "
+              f"Ping={result_data['ping']:.2f} ms, "
+              f"Download={result_data['download']:.2f} Mbps, "
+              f"Upload={result_data['upload']:.2f} Mbps")
+    except speedtest.ConfigRetrievalError as e:
+        print(f"  Speedtest ConfigRetrievalError (DNS/connectivity issue to speedtest.net config): {e}")
+    except speedtest.NoMatchedServers as e:
+        print(f"  Speedtest NoMatchedServers (could be due to source IP or network restrictions): {e}")
+    # Catch other speedtest-specific errors
+    except speedtest.SpeedtestException as e:
+        print(f"  Speedtest library failed: {e}")
+    # Catch any other unexpected errors
+    except Exception as e:
+        print(f"  Speedtest process failed unexpectedly: {e}")
+    finally:
+        result_queue.put(result_data)
 
-def scan_wifi_aps(interface=WIRELESS_INTERFACE):
-    """Scans for WiFi APs and updates Prometheus metrics."""
-    print(f"Scanning for WiFi APs on {interface}...")
-    aps = []
-    cmd = ["iwlist", interface, "scan"]
+def parse_nmcli_wifi_line(line, header_map):
+    ap = {}
+    # Split on 2 or more spaces
+    parts = re.split(r'\s{2,}', line.strip())
     try:
-        if os.geteuid() != 0: print("  Warning: 'iwlist scan' may require root privileges for full results.")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
-        output = result.stdout
-        # Simplified parsing logic (adjust regex if needed for different iwlist versions)
-        current_ap = {}
-        for line in output.splitlines():
-            line = line.strip()
-            if line.startswith("Cell"):
-                if current_ap: aps.append(current_ap)
-                addr_match = re.search(r"Address: (([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})", line)
-                current_ap = {'bssid': addr_match.group(1) if addr_match else None}
-            elif "ESSID:" in line:
-                ssid_match = re.search(r'ESSID:"([^"]*)"', line)
-                current_ap['ssid'] = ssid_match.group(1) if ssid_match else '<hidden>'
-            elif "Channel:" in line:
-                 channel_match = re.search(r"Channel:(\d+)", line)
-                 if channel_match: current_ap['channel'] = channel_match.group(1)
-            elif "Frequency:" in line and 'channel' not in current_ap: # Alternative channel finding
-                 freq_match = re.search(r"\(Channel (\d+)\)", line)
-                 if freq_match: current_ap['channel'] = freq_match.group(1)
-            elif "Signal level=" in line:
-                 signal_match = re.search(r"Signal level=(-?\d+)\s*dBm", line)
-                 if signal_match: current_ap['signal'] = int(signal_match.group(1))
-            # Add other fields if needed (Quality, Encryption, etc.)
-        if current_ap: aps.append(current_ap) # Add the last AP
+        bssid_idx = header_map.get("BSSID")
+        ssid_idx = header_map.get("SSID")
+        chan_idx = header_map.get("CHAN")
+        # nmcli SIGNAL is 0-100 quality
+        signal_quality_idx = header_map.get("SIGNAL")
 
-    except subprocess.TimeoutExpired: print(f"  iwlist scan command timed out for {interface}")
-    except subprocess.CalledProcessError as e: print(f"  Failed to run iwlist scan on {interface}: {e}")
-    except FileNotFoundError: print("  Error: 'iwlist' command not found. Is 'wireless-tools' installed?")
-    except Exception as e: print(f"  Error during WiFi AP scan: {e}")
+        if bssid_idx is not None and bssid_idx < len(parts):
+            ap['bssid'] = parts[bssid_idx]
+        if ssid_idx is not None and ssid_idx < len(parts):
+            ap['ssid'] = parts[ssid_idx]
+        if chan_idx is not None and chan_idx < len(parts):
+            ap['channel'] = parts[chan_idx]
 
-    # Clear previous AP metrics before adding new ones
+        if signal_quality_idx is not None and signal_quality_idx < len(parts):
+            quality_str = parts[signal_quality_idx]
+            if quality_str and quality_str != '--':
+                quality = int(quality_str)
+                if 0 <= quality <= 100:
+                    # Approximate conversion from quality (0-100) to dBm
+                    # This is a rough heuristic: dBm = (Quality / 2) - 100
+                    ap['signal_dbm'] = (quality / 2.0) - 100.0
+                else:
+                    # Invalid quality
+                    ap['signal_dbm'] = -101
+            else:
+                # Missing signal quality
+                ap['signal_dbm'] = -102
+        else:
+            # Signal column not found or parse error
+            ap['signal_dbm'] = -103
+
+        if ap.get('ssid') == '--':
+            ap['ssid'] = '<hidden_or_empty>'
+
+    except (IndexError, ValueError):
+        # Can be noisy, so typically commented out unless debugging parsing
+        # print(f"  Error parsing nmcli line part: '{line}'. Error: {e}")
+        return None
+    if all(k in ap for k in ('ssid', 'bssid', 'channel', 'signal_dbm')):
+        return ap
+    return None
+
+def get_nmcli_header_map(header_line):
+    headers_raw = re.split(r'\s{2,}', header_line.strip())
+    # Remove IN-USE '*' from header names
+    header_map = {name.upper().replace('*','').strip(): i for i, name in enumerate(headers_raw)}
+    required_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"]
+    if not all(h in header_map for h in required_headers):
+        print(f"  Error: nmcli output missing one of required headers: {required_headers}. Found: {list(header_map.keys())}")
+        return None
+    return header_map
+
+def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
+    if not interface:
+        print("  Skipping nmcli WiFi scan: No wireless interface configured.")
+        return
+
+    print(f"Scanning for WiFi APs on {interface} using nmcli...")
+    aps = []
+    rescan_cmd = ["nmcli", "dev", "wifi", "rescan", "ifname", interface]
+    try:
+        print(f"  Triggering Wi-Fi rescan on {interface}...")
+        subprocess.run(rescan_cmd, capture_output=True, text=True, check=False, timeout=10)
+        print(f"  Rescan command sent. Waiting a moment...")
+        time.sleep(3)
+    except subprocess.TimeoutExpired:
+        print(f"  nmcli rescan command timed out for {interface}.")
+    except FileNotFoundError:
+        print("  Error: 'nmcli' command not found for rescan.")
+        return
+    except Exception as e:
+        print(f"  Unexpected error during nmcli rescan: {e}")
+
+    list_cmd = ["nmcli", "dev", "wifi", "list", "ifname", interface]
+    header_map = None
+    try:
+        result = subprocess.run(list_cmd, capture_output=True, text=True, check=True, timeout=15)
+        output_lines = result.stdout.splitlines()
+        if not output_lines:
+            print("  nmcli output is empty after rescan.")
+            return
+
+        header_line_index = 0
+        # More robust check for header
+        if output_lines[0].lstrip().startswith("IN-USE"):
+             # Header is the first line
+             header_line_index = 0
+        # Old nmcli IN-USE marker
+        elif output_lines[0].lstrip().startswith("*"):
+             header_line_index = 1
+
+        if header_line_index >= len(output_lines):
+            print("  nmcli output too short for header.")
+            return
+
+        header_map = get_nmcli_header_map(output_lines[header_line_index])
+        if not header_map:
+            return
+
+        for line_num, line_content in enumerate(output_lines[header_line_index + 1:]):
+            # Remove IN-USE marker if present
+            clean_line = line_content.lstrip().replace('*','',1).lstrip()
+            ap_data = parse_nmcli_wifi_line(clean_line, header_map)
+            if ap_data:
+                aps.append(ap_data)
+    except subprocess.TimeoutExpired:
+        print(f"  nmcli list command timed out for {interface}")
+    except subprocess.CalledProcessError as e:
+        print(f"  Failed to run nmcli list on {interface}: {e}. Output: {e.stderr.strip()}")
+    except FileNotFoundError:
+        print("  Error: 'nmcli' command not found for listing.")
+        return
+    except Exception as e:
+        print(f"  Error during WiFi AP list with nmcli: {e}")
+
     WIFI_AP_SIGNAL.clear()
-    reported_aps = set() # Avoid duplicate labels if scan returns same AP multiple times
+    reported_bssids = set()
     valid_aps_count = 0
     for ap in aps:
-        # Ensure mandatory fields were parsed
-        if all(k in ap for k in ('ssid', 'bssid', 'channel', 'signal')):
-            label_tuple = (ap['ssid'], ap['bssid'], ap['channel'])
-            if label_tuple not in reported_aps:
-                try:
-                    # Sanitize SSID label - Prometheus labels have restrictions
-                    sanitized_ssid = re.sub(r'[^a-zA-Z0-9_:]', '_', ap['ssid'])
-                    WIFI_AP_SIGNAL.labels(ssid=sanitized_ssid, bssid=ap['bssid'], channel=ap['channel']).set(ap['signal'])
-                    reported_aps.add(label_tuple)
-                    valid_aps_count += 1
-                except Exception as label_err: # Catch errors setting specific labels
-                    print(f"  Error setting label for AP {ap.get('ssid','N/A')} (BSSID: {ap.get('bssid','N/A')}). Error: {label_err}")
-        # else: print(f"  Skipping AP due to missing fields: {ap}") # Optional debug
+        if ap['bssid'] not in reported_bssids:
+            try:
+                sanitized_ssid = re.sub(r'[^a-zA-Z0-9_:]', '_', ap['ssid'])
+                if not sanitized_ssid:
+                    sanitized_ssid = "_empty_or_hidden_"
+                WIFI_AP_SIGNAL.labels(
+                    ssid=sanitized_ssid, bssid=ap['bssid'], channel=str(ap['channel'])
+                ).set(ap['signal_dbm'])
+                reported_bssids.add(ap['bssid'])
+                valid_aps_count += 1
+            except Exception as label_err:
+                print(f"  Error setting label for AP {ap.get('ssid','N/A')} (BSSID: {ap.get('bssid','N/A')}). Error: {label_err}")
+    print(f"  nmcli scan: Found and processed {valid_aps_count} unique APs after rescan.")
+    if not aps:
+        print("  No APs found in nmcli scan after rescan.")
 
-    print(f"  Found and processed {valid_aps_count} valid APs.")
-    if not aps: print("  No APs found in scan.")
-
-
-# --- Function for Device IP ---
-def update_device_ip(interface=WIRELESS_INTERFACE):
-    """Gets the device's IPv4 address for the specified interface and updates Prometheus."""
+def update_device_ip(interface_to_check):
     global current_ip_labels
-    print(f"Checking IP address for {interface}...")
-    current_ip = None
+    # Skip if interface name is None or empty
+    if not interface_to_check:
+        return
+
+    print(f"Checking IP address for {interface_to_check}...")
+    current_ip_for_this_interface = None
     try:
         result = subprocess.run(
-            ["ip", "-4", "addr", "show", interface],
+            ["ip", "-4", "addr", "show", interface_to_check],
             capture_output=True, text=True, check=True, timeout=3
         )
         ip_match = re.search(r"inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/", result.stdout)
         if ip_match:
-            current_ip = ip_match.group(1)
-            print(f"  Found IP: {current_ip}")
+            current_ip_for_this_interface = ip_match.group(1)
+            print(f"  Found IP for {interface_to_check}: {current_ip_for_this_interface}")
         else:
-            print(f"  No IPv4 address found for {interface}.")
-    except FileNotFoundError: print("  Error: 'ip' command not found. Is 'iproute2' package installed?")
-    except subprocess.TimeoutExpired: print(f"  'ip addr show' command timed out for {interface}")
-    except subprocess.CalledProcessError: print(f"  Failed to get IP for {interface} (is it up?).") # Interface might be down
-    except Exception as e: print(f"  Error getting IP address: {e}")
+            print(f"  No IPv4 address found for {interface_to_check}.")
+    except FileNotFoundError:
+        print(f"  Error: 'ip' command not found (checking {interface_to_check}).")
+    except subprocess.TimeoutExpired:
+        print(f"  'ip addr show' command timed out for {interface_to_check}")
+    except subprocess.CalledProcessError:
+        print(f"  Failed to get IP for {interface_to_check} (interface might be down/not exist).")
+    except Exception as e:
+        print(f"  Error getting IP address for {interface_to_check}: {e}")
 
-    # --- Update Prometheus Metric and internal state ---
-    last_known_ip = current_ip_labels.get(interface)
-
-    if current_ip != last_known_ip:
-        # Remove old label if it existed
+    last_known_ip = current_ip_labels.get(interface_to_check)
+    if current_ip_for_this_interface != last_known_ip:
         if last_known_ip:
             try:
-                NETWORK_INTERFACE_INFO.remove(interface, last_known_ip)
-                print(f"  Removed old IP label: {interface} / {last_known_ip}")
-            except KeyError: pass # OK if label didn't exist
-            except Exception as e: print(f"  Error removing old IP label {interface} / {last_known_ip}: {e}")
-
-        # Add new label if we have a current IP
-        if current_ip:
-            try:
-                NETWORK_INTERFACE_INFO.labels(interface=interface, ip_address=current_ip).set(1)
-                current_ip_labels[interface] = current_ip # Store the new IP internally
-                print(f"  Set new IP label: {interface} / {current_ip}")
+                NETWORK_INTERFACE_INFO.remove(interface_to_check, last_known_ip)
+                print(f"  Removed old IP label: {interface_to_check} / {last_known_ip}")
+            except KeyError:
+                pass
             except Exception as e:
-                print(f"  Error setting new IP label {interface} / {current_ip}: {e}")
-                # If setting failed, remove from internal state too
-                if interface in current_ip_labels: del current_ip_labels[interface]
+                print(f"  Error removing old IP label {interface_to_check} / {last_known_ip}: {e}")
+        if current_ip_for_this_interface:
+            try:
+                NETWORK_INTERFACE_INFO.labels(interface=interface_to_check, ip_address=current_ip_for_this_interface).set(1)
+                current_ip_labels[interface_to_check] = current_ip_for_this_interface
+                print(f"  Set new IP label: {interface_to_check} / {current_ip_for_this_interface}")
+            except Exception as e:
+                print(f"  Error setting new IP label {interface_to_check} / {current_ip_for_this_interface}: {e}")
+                if interface_to_check in current_ip_labels:
+                    del current_ip_labels[interface_to_check]
         else:
-            # If no IP found now, ensure it's removed from internal state
-             if interface in current_ip_labels: del current_ip_labels[interface]
+             if interface_to_check in current_ip_labels:
+                 del current_ip_labels[interface_to_check]
 
-    # If IP is the same, do nothing to the metric or internal state
-
-
-# --- Functions for Unique Identifier ---
+# --- Identifier Functions ---
 def get_raspberry_pi_serial():
-    """Attempts to read the Raspberry Pi's unique serial number."""
     global raspberry_pi_serial
-    if raspberry_pi_serial: return raspberry_pi_serial
+    if raspberry_pi_serial:
+        return raspberry_pi_serial
     serial = "UnknownSN"
     try:
         with open('/proc/cpuinfo', 'r') as f:
@@ -302,30 +445,23 @@ def get_raspberry_pi_serial():
                     serial_match = re.search(r":\s*([0-9a-fA-F]+)$", line)
                     if serial_match:
                         serial = serial_match.group(1)
-                        break # Found it
+                        break
     except Exception as e:
-        print(f"  Warning: Could not read serial number from /proc/cpuinfo: {e}")
+        print(f"  Warning: Could not read serial from /proc/cpuinfo: {e}")
     raspberry_pi_serial = serial
-    if serial == "UnknownSN":
-        print("Warning: Could not determine Raspberry Pi serial number.")
-    # else: print(f"  Found Serial: {raspberry_pi_serial}") # Optional debug
     return raspberry_pi_serial
 
 def generate_new_identifier():
-    """Generates a unique identifier using Serial and current timestamp."""
     serial = get_raspberry_pi_serial()
     timestamp_int = int(time.time())
-    # Use URL-safe base64 encoding, remove padding
     timestamp_b64 = base64.urlsafe_b64encode(timestamp_int.to_bytes(8, byteorder='big')).rstrip(b'=').decode('utf-8')
-    new_identifier = f"{serial}-{timestamp_b64}"
-    print(f"  Generated new identifier: {new_identifier}")
-    return new_identifier
+    return f"{serial}-{timestamp_b64}"
 
 def save_identifier(identifier):
-    """Saves the generated identifier to a file."""
     try:
         os.makedirs(os.path.dirname(IDENTIFIER_FILE), exist_ok=True)
-        with open(IDENTIFIER_FILE, 'w') as f: f.write(identifier)
+        with open(IDENTIFIER_FILE, 'w') as f:
+            f.write(identifier)
         print(f"  Identifier saved to {IDENTIFIER_FILE}")
         return True
     except Exception as e:
@@ -333,53 +469,46 @@ def save_identifier(identifier):
         return False
 
 def load_identifier():
-    """Loads the identifier from the file if it exists."""
     if os.path.exists(IDENTIFIER_FILE):
         try:
-            with open(IDENTIFIER_FILE, 'r') as f: identifier = f.read().strip()
+            with open(IDENTIFIER_FILE, 'r') as f:
+                identifier = f.read().strip()
             if identifier:
                 print(f"  Loaded identifier from {IDENTIFIER_FILE}: {identifier}")
                 return identifier
-        except Exception as e: print(f"  Error reading identifier file {IDENTIFIER_FILE}: {e}")
-    print(f"  Identifier file not found or empty: {IDENTIFIER_FILE}")
+        except Exception as e:
+            print(f"  Error reading identifier file {IDENTIFIER_FILE}: {e}")
+    print(f"  Identifier file {IDENTIFIER_FILE} not found or empty.")
     return None
 
 def update_prometheus_identifier(new_identifier):
-    """Updates the Prometheus gauge for the device identifier."""
     global current_device_id_label
     old_label_to_remove = current_device_id_label
-    print(f"  Updating Prometheus identifier metric to: {new_identifier}")
     try:
         DEVICE_IDENTIFIER.labels(identifier=new_identifier).set(1)
-        current_device_id_label = new_identifier # Update global state *after* success
-        # print(f"  Set new Prometheus identifier label: {new_identifier}") # Optional debug
+        current_device_id_label = new_identifier
     except Exception as e:
         print(f"  ERROR setting new Prometheus identifier label '{new_identifier}': {e}")
-        return # Abort if we can't set the new label
-
-    # Remove the old label if it was different
+        return
     if old_label_to_remove and old_label_to_remove != new_identifier:
         try:
             DEVICE_IDENTIFIER.remove(old_label_to_remove)
-            # print(f"  Removed old Prometheus ID label: {old_label_to_remove}") # Optional debug
-        except KeyError: pass # Ignore if not found
-        except Exception as e: print(f"  ERROR removing old Prometheus ID label '{old_label_to_remove}': {e}")
+        except KeyError:
+            pass
+        except Exception as e:
+            print(f"  ERROR removing old Prometheus ID label '{old_label_to_remove}': {e}")
 
 def handle_identifier_update():
-    """Handles the process of generating, saving, and updating the identifier."""
     print("\n--- Generating New Identifier ---")
     new_id = generate_new_identifier()
     if save_identifier(new_id):
-        update_prometheus_identifier(new_id) # Only update Prometheus if save was successful
+        update_prometheus_identifier(new_id)
     else:
         print("--- Identifier Update Failed (Could not save) ---")
-        return # Don't update Prometheus if we couldn't save
     print("--- Identifier Update Complete ---\n")
-
 
 # --- GPIO Setup and Button Check ---
 def setup_gpio():
-    """Configures the GPIO pins for the buttons."""
     try:
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
@@ -387,251 +516,274 @@ def setup_gpio():
         GPIO.setup(BUTTON_PIN_2, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         print(f"GPIO pins {BUTTON_PIN_1} and {BUTTON_PIN_2} setup complete.")
         return True
-    except RuntimeError as e:
-         print(f"ERROR setting up GPIO: {e}. Requires root/sudo? RPi.GPIO installed?")
-         return False
-    except Exception as e: # Catch other potential errors like missing libraries
-        print(f"An unexpected error occurred during GPIO setup: {e}")
+    except Exception as e:
+        print(f"ERROR setting up GPIO: {e}")
         return False
 
 def check_buttons():
-    """Checks the state of the two buttons and triggers update if both pressed."""
     global buttons_currently_pressed
     try:
-        button1_state = GPIO.input(BUTTON_PIN_1)
-        button2_state = GPIO.input(BUTTON_PIN_2)
-        # Buttons connect pin to GND, so LOW means pressed
-        if button1_state == GPIO.LOW and button2_state == GPIO.LOW:
+        b1_state = GPIO.input(BUTTON_PIN_1)
+        b2_state = GPIO.input(BUTTON_PIN_2)
+        if b1_state == GPIO.LOW and b2_state == GPIO.LOW:
             if not buttons_currently_pressed:
                 print(f"\nButton press detected (Pins {BUTTON_PIN_1} & {BUTTON_PIN_2})!")
                 handle_identifier_update()
-                buttons_currently_pressed = True # Set flag to prevent repeated triggers
-        else:
-            # Reset flag only when *both* buttons are released
-            if button1_state == GPIO.HIGH and button2_state == GPIO.HIGH:
-                 if buttons_currently_pressed:
-                     print("Buttons released.")
-                     buttons_currently_pressed = False
-    except RuntimeError: print("Error reading GPIO state. Check permissions/hardware.")
-    except Exception as e: print(f"An unexpected error occurred during button check: {e}")
+                buttons_currently_pressed = True
+        elif b1_state == GPIO.HIGH and b2_state == GPIO.HIGH:
+            if buttons_currently_pressed:
+                print("Buttons released.")
+                buttons_currently_pressed = False
+    except Exception as e:
+        print(f"An unexpected error occurred during button check: {e}")
 
+# --- Configuration Loading Functions ---
+def load_pi_api_key():
+    global PI_SHARED_API_KEY
+    key = None
+    if os.path.exists(API_KEY_FILE):
+        try:
+            with open(API_KEY_FILE, 'r') as f:
+                key = f.read().strip()
+            if key:
+                print(f"  Successfully loaded API key from {API_KEY_FILE}.")
+                PI_SHARED_API_KEY = key
+            else:
+                print(f"  Warning: API key file {API_KEY_FILE} is empty.")
+        except Exception as e:
+            print(f"  Warning: Error reading API key file {API_KEY_FILE}: {e}")
+    else:
+        print(f"  Warning: API key file {API_KEY_FILE} not found.")
 
-# --- Function for HTTP SD API Reporting ---
+    if not PI_SHARED_API_KEY:
+        print("  CRITICAL: Pi registration API key is NOT configured. API reports will likely fail.")
+        print(f"  To resolve, create '{API_KEY_FILE}' and put the shared API key in it.")
+
+def load_and_set_registrar_url():
+    global REGISTRAR_API_URL
+    loaded_from_file = False
+    if os.path.exists(REGISTRAR_CONFIG_FILE):
+        try:
+            with open(REGISTRAR_CONFIG_FILE, 'r') as f:
+                url_from_file = f.read().strip()
+            if url_from_file:
+                if not url_from_file.startswith("https://"):
+                    print(f"  Warning: URL from {REGISTRAR_CONFIG_FILE} ('{url_from_file}') isn't HTTPS.")
+                REGISTRAR_API_URL = url_from_file
+                loaded_from_file = True
+            else:
+                print(f"  Info: Registrar URL file '{REGISTRAR_CONFIG_FILE}' is empty.")
+        except Exception as e:
+            print(f"  Warning: Error reading registrar URL file '{REGISTRAR_CONFIG_FILE}': {e}")
+    else:
+        print(f"  Info: Registrar URL configuration file '{REGISTRAR_CONFIG_FILE}' not found.")
+
+    if loaded_from_file:
+        print(f"  Registrar API URL configured from file: {REGISTRAR_API_URL}")
+    else:
+        print(f"  Using default script-defined Registrar API URL: {REGISTRAR_API_URL}")
+        print(f"  (To customize, create and populate '{REGISTRAR_CONFIG_FILE}')")
+    if "PLEASE_CONFIGURE_IN_FILE" in REGISTRAR_API_URL:
+        print("CRITICAL WARNING: REGISTRAR_API_URL needs configuration in a file or script default.")
+
+# --- HTTP SD API Reporting Function ---
 def report_ip_to_api(identifier, ip_address, port):
-    """Sends this Pi's details to the registration API."""
-    global last_reported_ip_for_api
+    global last_reported_ip_for_api, PI_SHARED_API_KEY, REGISTRAR_API_URL
 
     if not identifier or not ip_address:
-        print("  [API Report] Skipping API report: Missing identifier or IP.")
-        return False # Indicate failure/skip
+        print("  [API Report] Skipping: Missing identifier or IP.")
+        return False
+    if not PI_SHARED_API_KEY:
+        print("  [API Report] Skipping: Pi's API key not loaded.")
+        return False
+    if "PLEASE_CONFIGURE_IN_FILE" in REGISTRAR_API_URL:
+        print(f"  [API Report] Skipping: REGISTRAR_API_URL not configured.")
+        return False
+    if not REGISTRAR_API_URL.startswith("https://"):
+        print(f"  [API Report] Warning: REGISTRAR_API_URL ('{REGISTRAR_API_URL}') not HTTPS.")
 
-    # Use the configured URL
     api_endpoint = REGISTRAR_API_URL
-
-    payload = {
-        "identifier": identifier,
-        "ip": ip_address,
-        "port": port # Send the port the exporter is running on
-    }
+    payload = {"identifier": identifier, "ip": ip_address, "port": port}
+    headers = {"X-Pi-Register-Api-Key": PI_SHARED_API_KEY}
+    verify_path = SERVER_CERT_PATH_ON_PI
+    if not os.path.exists(verify_path):
+        print(f"  [API Report] WARNING: Server certificate '{verify_path}' not found. HTTPS calls WITHOUT VERIFICATION (INSECURE).")
+        verify_path = False
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     try:
-        print(f"  [API Report] Attempting to report to {api_endpoint} with payload: {payload}")
-        response = requests.post(api_endpoint, json=payload, timeout=10) # 10 second timeout
-        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
-        print(f"  [API Report] Successfully reported IP {ip_address} for {identifier} (Status: {response.status_code}).")
-        last_reported_ip_for_api = ip_address # Update last reported IP only on success
-        return True # Indicate success
-
+        print(f"  [API Report] Attempting to report to {api_endpoint} (IP: {ip_address})")
+        response = requests.post(api_endpoint, json=payload, headers=headers, timeout=10, verify=verify_path)
+        response.raise_for_status()
+        print(f"  [API Report] Successfully reported (Status: {response.status_code}).")
+        last_reported_ip_for_api = ip_address
+        return True
+    except requests.exceptions.SSLError as e:
+        print(f"  [API Report] ERROR: SSL Error. Check cert '{SERVER_CERT_PATH_ON_PI}'. Details: {e}")
     except requests.exceptions.Timeout:
-        print(f"  [API Report] ERROR: Timeout connecting to API at {api_endpoint}")
+        print(f"  [API Report] ERROR: Timeout connecting to {api_endpoint}")
     except requests.exceptions.ConnectionError:
-        print(f"  [API Report] ERROR: Connection refused or network error for API at {api_endpoint}")
+        print(f"  [API Report] ERROR: Connection error for {api_endpoint}")
     except requests.exceptions.HTTPError as e:
-         print(f"  [API Report] ERROR: HTTP Error {e.response.status_code} reporting to API: {e.response.text}")
+        print(f"  [API Report] ERROR: HTTP {e.response.status_code}: {e.response.text}")
     except requests.exceptions.RequestException as e:
-        print(f"  [API Report] ERROR: General failure reporting IP to API at {api_endpoint}: {e}")
-
-    return False # Indicate failure
-# --- End HTTP SD Function ---
-
+        print(f"  [API Report] ERROR: General failure reporting: {e}")
+    return False
 
 # --- Main Execution ---
 def main():
     global last_check_times, speedtest_process, speedtest_queue
-    # Add HTTP SD globals to main scope
-    global last_api_report_time, last_reported_ip_for_api
+    global last_api_report_time, last_reported_ip_for_api, current_ip_labels
 
-    # --- Initial checks ---
     if os.geteuid() != 0:
-        print("Warning: Root privileges may be required for some functions (GPIO, iwlist scan).")
-        time.sleep(2)
-    if subprocess.run(["which", "ip"], capture_output=True).returncode != 0:
-        print("Error: 'ip' command not found. Please install 'iproute2' (e.g., sudo apt install iproute2).")
-        # return # Optionally exit
-    if subprocess.run(["which", "iwconfig"], capture_output=True).returncode != 0:
-        print("Warning: 'iwconfig' command not found. Wireless metrics unavailable. Install 'wireless-tools'.")
-    if subprocess.run(["which", "iwlist"], capture_output=True).returncode != 0:
-        print("Warning: 'iwlist' command not found. WiFi AP scan unavailable. Install 'wireless-tools'.")
+        print("Warning: Root privileges may be required for some functions.")
+        time.sleep(1)
 
+    # Command existence checks
+    for cmd_name in ["nmcli", "ip", "ping"]:
+        if subprocess.run(["which", cmd_name], capture_output=True, text=True).returncode != 0:
+            print(f"CRITICAL ERROR: '{cmd_name}' command not found. Essential functions will fail. Please install it.")
+            # Consider exiting if essential commands are missing
+    if subprocess.run(["which", "iwconfig"], capture_output=True, text=True).returncode != 0:
+        print("Warning: 'iwconfig' not found. Connected AP signal (update_wireless_metrics) will fail.")
 
-    # --- Start Prometheus server ---
     try:
         start_http_server(PROMETHEUS_PORT)
         print(f"Prometheus metrics server started on port {PROMETHEUS_PORT}")
     except Exception as e:
-        print(f"FATAL: Error starting Prometheus server on port {PROMETHEUS_PORT}: {e}\nExiting.")
+        print(f"FATAL: Error starting Prometheus server: {e}\nExiting.")
         return
 
-    # --- Setup GPIO ---
     gpio_ok = setup_gpio()
-    if not gpio_ok: print("Warning: GPIO setup failed. Button press for ID reset disabled.")
+    if not gpio_ok:
+        print("Warning: GPIO setup failed. Button ID reset disabled.")
 
-    # --- Initial Identifier ---
     print("--- Initializing Device Identifier ---")
-    # Try load first, if fails or empty, generate new, save, then update Prometheus
     initial_id = load_identifier()
     if not initial_id:
         initial_id = generate_new_identifier()
-        save_identifier(initial_id) # Save the newly generated one
-    update_prometheus_identifier(initial_id) # Update Prometheus gauge with loaded/new ID
+        save_identifier(initial_id)
+    update_prometheus_identifier(initial_id)
     print("--- Device Identifier Initialized ---")
 
+    print("--- Loading Pi API Key for Registration ---")
+    load_pi_api_key()
+    print("--- Loading Registrar API URL Configuration ---")
+    load_and_set_registrar_url()
+    print("--- Configuration Loading Complete ---")
 
-    # --- Initialize timers ---
     now = time.time()
-    # Stagger initial checks slightly by setting last check time further in the past
-    last_check_times["ping_scan_ip"] = now - PING_SCAN_IP_INTERVAL - 5 # Force initial run soon
-    last_check_times["speedtest"] = now - SPEEDTEST_CHECK_INTERVAL - 10 # Force initial run slightly later
-    last_api_report_time = 0 # Force initial API report attempt immediately after first IP check
+    last_check_times["ping_scan_ip"] = now - PING_SCAN_IP_INTERVAL - 5
+    last_check_times["speedtest"] = now - SPEEDTEST_CHECK_INTERVAL - 10
+    last_api_report_time = 0
 
-    # --- Check REGISTRAR_API_URL Configuration ---
-    if "<YOUR_DOCKER_HOST_IP>" in REGISTRAR_API_URL:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! ERROR: REGISTRAR_API_URL is not configured in the script.      !!!")
-        print(f"!!! Please edit the script near line 40 and set the correct IP   !!!")
-        print("!!! Currently set to:", REGISTRAR_API_URL, "                       !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        time.sleep(10) # Give user time to see the error before continuing
-
-
-    # --- Main Loop ---
     print("--- Starting Monitoring Loop ---")
     try:
         while True:
             current_time = time.time()
+            if gpio_ok:
+                check_buttons()
 
-            # --- Check Buttons (runs every loop) ---
-            if gpio_ok: check_buttons()
-
-            # --- Scheduled Network/Scan/IP Checks ---
             if current_time - last_check_times["ping_scan_ip"] >= PING_SCAN_IP_INTERVAL:
                 print(f"\n--- Running Scheduled Checks (Interval: {PING_SCAN_IP_INTERVAL}s) ---")
-                run_ping_checks()
+                ping_if = WIRELESS_INTERFACE if PING_THROUGH_WIFI_ONLY else None
+                run_ping_checks(target=PING_TARGET, interface_to_use=ping_if)
                 update_wireless_metrics(WIRELESS_INTERFACE)
-                scan_wifi_aps(WIRELESS_INTERFACE)
-                update_device_ip(WIRELESS_INTERFACE) # This updates current_ip_labels
+                scan_wifi_aps_nmcli(WIRELESS_INTERFACE)
+                update_device_ip(WIRELESS_INTERFACE)
+                if LAN_INTERFACE:
+                    update_device_ip(LAN_INTERFACE)
                 last_check_times["ping_scan_ip"] = current_time
                 print("--- Scheduled Checks Complete ---")
 
-            # --- Periodic API Report ---
-            # Get the *current* values from the global variables updated by other functions
-            current_ip = current_ip_labels.get(WIRELESS_INTERFACE)
+            wireless_ip_for_reporting = current_ip_labels.get(WIRELESS_INTERFACE)
             identifier = current_device_id_label
-
-            # Conditions to trigger an API report:
-            # 1. We have an IP and an Identifier.
-            # 2. AND ( The IP is different from the last *successfully reported* IP OR
-            #          Enough time has passed since the last *attempted* report )
-            ip_changed = (current_ip is not None and current_ip != last_reported_ip_for_api)
+            ip_changed = (wireless_ip_for_reporting is not None and wireless_ip_for_reporting != last_reported_ip_for_api)
             time_to_report = (current_time - last_api_report_time >= API_REPORT_INTERVAL)
 
-            if identifier and current_ip and (ip_changed or time_to_report):
-                 print(f"\n--- Reporting to Registration API (Reason: {'IP Changed' if ip_changed else 'Periodic Update'}) ---")
-                 # Attempt to report
-                 report_ip_to_api(identifier, current_ip, PROMETHEUS_PORT)
-                 # Always update the last *attempt* time, regardless of success,
-                 # to ensure periodic retries/heartbeats
+            if identifier and wireless_ip_for_reporting and PI_SHARED_API_KEY and (ip_changed or time_to_report):
+                 print(f"\n--- Reporting to Registration API (IP: {wireless_ip_for_reporting}, Reason: {'IP Changed' if ip_changed else 'Periodic Update'}) ---")
+                 report_ip_to_api(identifier, wireless_ip_for_reporting, PROMETHEUS_PORT)
                  last_api_report_time = current_time
                  print("--- API Report Attempt Complete ---")
 
-
-            # --- Scheduled Speedtest Start ---
-            # Run only if a speedtest is not already in progress
             if current_time - last_check_times["speedtest"] >= SPEEDTEST_CHECK_INTERVAL:
                 if speedtest_process is None:
                     print(f"\n--- Starting New Speedtest (Interval: {SPEEDTEST_CHECK_INTERVAL}s) ---")
                     speedtest_queue = multiprocessing.Queue()
-                    # Make the child process a daemon so it doesn't block main exit
-                    speedtest_process = multiprocessing.Process(target=run_speedtest_child, args=(speedtest_queue,), daemon=True)
+                    st_if = WIRELESS_INTERFACE if SPEEDTEST_THROUGH_WIFI_ONLY else None
+                    speedtest_process = multiprocessing.Process(
+                        target=run_speedtest_child, args=(speedtest_queue, st_if), daemon=True
+                    )
                     speedtest_process.start()
-                    last_check_times["speedtest"] = current_time # Record start time
-                # else: print(f"({time.strftime('%H:%M:%S')}) Speedtest interval elapsed, but previous test still running.")
+                    last_check_times["speedtest"] = current_time
 
-
-            # --- Check for Speedtest Results (runs frequently) ---
             if speedtest_queue is not None:
                 try:
-                    result = speedtest_queue.get_nowait() # Non-blocking check
+                    result = speedtest_queue.get_nowait()
                     print("\n--- Processing Speedtest Results ---")
-                    SPEEDTEST_PING.set(result.get('ping', -1)) # Use .get for safety
+                    SPEEDTEST_PING.set(result.get('ping', -1))
                     DOWNLOAD_SPEED.set(result.get('download', -1))
                     UPLOAD_SPEED.set(result.get('upload', -1))
-                    # Clean up the finished process
                     if speedtest_process is not None:
-                        speedtest_process.join(timeout=0.5) # Give it a moment to exit cleanly
+                        speedtest_process.join(timeout=0.5)
                         if speedtest_process.is_alive():
-                             print("  Warning: Speedtest process did not exit cleanly after result, terminating.")
-                             speedtest_process.terminate()
-                             speedtest_process.join(timeout=1) # Wait for termination
-                    # Reset state
+                            print("  Warning: Speedtest process unclean exit, terminating.")
+                            speedtest_process.terminate()
+                            speedtest_process.join(timeout=1)
                     speedtest_process = None
                     if speedtest_queue:
                         speedtest_queue.close()
-                        try: speedtest_queue.join_thread() # Ensure queue feeder thread exits
-                        except Exception: pass
+                        try:
+                            speedtest_queue.join_thread()
+                        except Exception:
+                            pass
                     speedtest_queue = None
                     print("--- Speedtest Results Processed ---")
-
                 except multiprocessing.queues.Empty:
-                    # Queue is empty, check if the process died unexpectedly
                     if speedtest_process and not speedtest_process.is_alive():
-                         print("\n--- Speedtest process ended unexpectedly without result ---")
-                         print(f"  Exit code: {speedtest_process.exitcode}")
-                         speedtest_process.join(timeout=0) # Ensure resources are released
-                         speedtest_process = None; speedtest_queue = None
-                         # Set metrics to error state
-                         SPEEDTEST_PING.set(-1); DOWNLOAD_SPEED.set(-1); UPLOAD_SPEED.set(-1)
-
-                except Exception as e: # Catch other potential queue errors
+                         exit_code = speedtest_process.exitcode
+                         print(f"\n--- Speedtest process ended unexpectedly (Exit: {exit_code}) ---")
+                         if exit_code is None:
+                             try:
+                                 speedtest_process.terminate()
+                                 speedtest_process.join(timeout=0.1)
+                             except Exception:
+                                 pass
+                         else:
+                             speedtest_process.join(timeout=0)
+                         speedtest_process = None
+                         speedtest_queue = None
+                         SPEEDTEST_PING.set(-1)
+                         DOWNLOAD_SPEED.set(-1)
+                         UPLOAD_SPEED.set(-1)
+                except Exception as e:
                     print(f"\n--- Error processing speedtest queue: {e} ---")
                     if speedtest_process and speedtest_process.is_alive():
-                        print("  Terminating running speedtest process due to queue error.")
-                        speedtest_process.terminate(); speedtest_process.join(timeout=1)
-                    speedtest_process = None; speedtest_queue = None
-                    # Set metrics to error state
-                    SPEEDTEST_PING.set(-1); DOWNLOAD_SPEED.set(-1); UPLOAD_SPEED.set(-1)
-
-
-            # --- Main Loop Sleep ---
+                        print("  Terminating speedtest process due to queue error.")
+                        speedtest_process.terminate()
+                        speedtest_process.join(timeout=1)
+                    speedtest_process = None
+                    speedtest_queue = None
+                    SPEEDTEST_PING.set(-1)
+                    DOWNLOAD_SPEED.set(-1)
+                    UPLOAD_SPEED.set(-1)
             time.sleep(LOOP_SLEEP_INTERVAL)
-
     except KeyboardInterrupt:
         print("\nShutdown requested via KeyboardInterrupt.")
     except Exception as e:
-        print(f"\nFATAL ERROR in main loop: {e}") # Catch unexpected errors
+        print(f"\nFATAL ERROR in main loop: {e}")
         import traceback
-        traceback.print_exc() # Print stack trace for debugging
+        traceback.print_exc()
     finally:
         print("--- Initiating Shutdown Sequence ---")
-        # No specific cleanup needed for API reporting, API handles timeouts
         if speedtest_process and speedtest_process.is_alive():
             print("Terminating active speedtest process...")
             speedtest_process.terminate()
-            speedtest_process.join(timeout=2) # Wait a bit for termination
+            speedtest_process.join(timeout=2)
         if gpio_ok:
             print("Cleaning up GPIO...")
             GPIO.cleanup()
         print("--- Shutdown Complete ---")
 
-
 if __name__ == '__main__':
-    main() # Run the main function
+    main()
