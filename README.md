@@ -1,168 +1,292 @@
 # AeroScan - Wireless Network Q&P Monitoring
 
-[![License: CC BY‑NC‑SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 ## Overview
 
-AeroScan is an IoT-based system designed to monitor the Quality and Performance (Q&P) of the wireless network infrastructure. Developed for scanning network performance, this project utilises Raspberry Pi devices deployed across site to collect real-time network metrics, providing valuable insights into network health, identifying potential issues, and helping to ensure a reliable wireless experience for students and staff.
+AeroScan is an IoT-based system designed to monitor the Quality and Performance (Q&P) of wireless network infrastructure. This project utilizes Raspberry Pi devices deployed across a site to collect real-time network metrics. These metrics are then sent to a central server for aggregation by Prometheus and visualization via Grafana dashboards, providing valuable insights into network health, helping to identify potential issues, and ensuring a reliable wireless experience.
 
-The system addresses the need for automated, continuous monitoring, moving beyond manual checks and reactive troubleshooting. Data collected by the Raspberry Pi units is visualized through a centralized Grafana dashboard, offering clear view of network performance across different locations.
+The system features a central registration service (`pi-registrar`) for dynamic discovery of Raspberry Pi nodes by Prometheus. Configuration of the Raspberry Pis, including sensitive details like WiFi credentials and API keys, can be managed remotely using Ansible from the central server.
 
 ## Features
-* **Real-time Visualization:** Integrates with Prometheus for metrics scraping and Grafana for dashboard display.
-* **Distributed Monitoring:** Uses low-cost Raspberry Pi devices as network sensors.
-* **Real-Time Monitoring:** Continuously scans and collects data on wireless network performance.
-* **Comprehensive Metrics:** Gathers data on:
-    * Wireless Signal Strength (RSSI) & Link Quality 
-    * Network Latency (Ping Times) & Jitter
-    * Internet Bandwidth (Upload/Download via Speedtest)
-    * Connected Access Point Details (SSID, BSSID, Channel, Frequency, Signal Strength)
-    * Nearby Wireless Access Points Scan(SSID, BSSID, Channel, Frequency, Signal Strength)
-    * Device IP Address
-* **Multi-AP Scanning:** Capable of scanning and reporting on multiple Wireless Access Points (WAPs) within range.
-* **Disruption Handling:** Designed to detect when a connected WAP goes down, automatically scan for, and connect to the next available WAP.
-* **Scalability:** Built to support multiple Raspberry Pi devices deployed across campus for wide coverage.
-* **Centralized Visualization:** Integrates with Prometheus for data scraping and Grafana for displaying metrics on a dashboard.
-* **Remote Accessibility:** Devices can be configured for remote access (e.g., via SSH) for maintenance and troubleshooting.
-*   **Unique Device Identification:** Each Raspberry Pi sensor has a persistent unique identifier.
-*   **GPIO Interaction:** Includes functionality to reset the device identifier using physical buttons connected to GPIO pins (optional hardware setup).
+
+*   **Distributed Monitoring:** Uses Raspberry Pi devices as network sensors.
+*   **Centralized Data Collection & Visualization:** Employs Prometheus for metrics scraping/storage and Grafana for dashboards.
+*   **Dynamic Pi Discovery:** A custom `pi-registrar` service allows Prometheus to dynamically find active Raspberry Pi nodes.
+*   **Secure Communication:**
+    *   Pis report to the registrar over HTTPS.
+    *   Registrar uses an API key for authenticating Pi registration.
+    *   Prometheus scrapes the registrar over HTTPS.
+*   **Comprehensive Metrics Collection:**
+    *   Network Latency (Ping RTT, TTL) & Jitter.
+    *   Internet Bandwidth (Upload/Download via Speedtest).
+    *   Connected WiFi AP Signal Strength & Link Quality (via `iwconfig`).
+    *   Nearby Wireless Access Points Scan (SSID, BSSID, Channel, Signal Strength via `nmcli`).
+    *   Device IP Addresses (for specified wireless and LAN interfaces).
+*   **Remote Configuration (via Ansible):**
+    *   Ability to update Pi configurations (WiFi credentials, API keys, script settings) from the central server using Ansible.
+    *   Dynamic Ansible inventory sourced from the `pi-registrar` service.
+*   **Unique Device Identification:** Each Raspberry Pi sensor uses a persistent unique identifier.
+*   **GPIO Interaction (Optional):** Functionality to reset the device identifier using physical buttons.
 
 ## Technology Stack
 
-*   **Hardware:**
-    *   Raspberry Pi Zero WH (Primary target)
-    *   Raspberry Pi 4 Model B (Development/Alternative)
-    *   MicroSD Cards (Minimum 16GB recommended)
-    *   Power Supplies
-    *   (Optional) Push Buttons and wiring for GPIO interaction
-*   **Operating System:** Custom Raspberry Pi OS image (potentially built using `pi-gen`)
-*   **Core Software:**
+*   **Sensor Hardware (Raspberry Pi):**
+    *   Raspberry Pi (e.g., Zero WH, 3B+, 4B)
+    *   MicroSD Card (16GB+ recommended)
+    *   Power Supply
+    *   (Optional) Push Buttons and wiring for GPIO.
+*   **Sensor Operating System:**
+    *   Custom Raspberry Pi OS image (Debian-based).
+    *   Assumes NetworkManager is installed and managing network interfaces.
+*   **Sensor Software (Raspberry Pi - `pi/software/main.py`):**
     *   Python 3
-    *   `prometheus_client` (Python library)
-    *   `speedtest-cli` (Python library)
-    *   `RPi.GPIO` (Python library for button interaction)
-*   **Network Tools (Command Line):**
+    *   `prometheus_client` (for exposing metrics)
+    *   `speedtest-cli` (for bandwidth tests)
+    *   `RPi.GPIO` (for button interaction)
+    *   `requests` (for reporting to registrar)
+*   **Sensor System Tools (on Pi):**
     *   `ping`
-    *   `iwconfig` / `nmcli dev wifi rescan ` / `NetworkManager` (Wireless tools)
     *   `ip` (from `iproute2` package)
-*   **Monitoring & Visualization:**
-    *   Prometheus (Exporter on Pi, Central Server for scraping/storage)
-    *   Grafana (Dashboard visualization, connected to Prometheus)
+    *   `iwconfig` (from `wireless-tools` package for connected AP metrics)
+    *   `nmcli` (NetworkManager CLI for WiFi scanning and management)
+    *   `git` (for pulling script updates)
+*   **Central Server (Ubuntu recommended):**
+    *   Docker & Docker Compose
+    *   **Services (Managed by Docker Compose):**
+        *   Prometheus (Scraping, Storage)
+        *   Grafana (Visualization)
+        *   Pi-Registrar (Custom Flask API for Pi registration and service discovery)
+    *   Ansible (For remote configuration of Pis, runs on the Docker host or in a container)
 *   **Version Control:** Git / GitHub
-*   **Collaboration:** Microsoft Teams, Discord, OneDrive/SharePoint
-
 
 ## Architecture Overview
 
-1.  **Data Collection (Raspberry Pi):**
-    *   A Python script (`main.py`) runs continuously on each Raspberry Pi.
-    *   It periodically executes network tests (`ping`, `speedtest-cli`, `iwconfig`, `nmcli dev wifi rescan`, `ip addr show`).
-    *   It parses the output of these commands to extract relevant metrics.
-    *   It reads GPIO pins to check for button presses (for ID reset).
-2.  **Metrics Exposure (Raspberry Pi):**
-    *   The Python script uses the `prometheus_client` library to expose the collected metrics via an HTTP endpoint (default: port 8000, `/metrics`).
-    *   A unique, persistent identifier is generated/loaded for each Pi and exposed as a label.
-3.  **Metrics Scraping (Central Server):**
-    *   A central Prometheus server is configured to periodically "scrape" the `/metrics` endpoint of each deployed Raspberry Pi.
-4.  **Storage & Querying (Central Server):**
-    *   Prometheus stores the scraped time-series data.
-5.  **Visualization (Central Server/Client):**
-    *   Grafana connects to the Prometheus server as a data source.
-    *   Dashboards are created in Grafana to query and visualize the network metrics over time, filterable by device identifier or location (if configured).
-
+1.  **Raspberry Pi Node (`main.py`):**
+    *   Pulls the latest version of `AeroScan/pi/software/main.py` from Git on boot.
+    *   Reads local configuration files for registrar URL, API key, and RPi Connect device name.
+    *   Periodically collects network metrics using system tools (`ping`, `speedtest-cli`, `iwconfig`, `nmcli`).
+    *   Exposes these metrics via a Prometheus exporter endpoint (e.g., `http://<pi_ip>:8000/metrics`).
+    *   Registers itself (identifier, IP, metrics port) with the central `pi-registrar` service over HTTPS using an API key.
+2.  **Central Server:**
+    *   **Pi-Registrar Service (Docker):**
+        *   A Flask API listens for registrations from Pi nodes.
+        *   Exposes an `/targets` endpoint for Prometheus HTTP Service Discovery (providing a list of active Pis).
+        *   Exposes an `/ansible_inventory` endpoint (dynamic inventory source for Ansible).
+        *   Serves traffic over HTTPS using self-signed certificates generated by `setup_server.sh`.
+    *   **Prometheus (Docker):**
+        *   Configured to use HTTP Service Discovery, querying the `pi-registrar`'s `/targets` endpoint to find Pis to scrape.
+        *   Scrapes metrics from each registered Pi.
+        *   Stores time-series data.
+    *   **Grafana (Docker):**
+        *   Connects to Prometheus as a data source.
+        *   Provides dashboards for visualizing network metrics from all Pis.
+    *   **Ansible (on Docker Host):**
+        *   Uses a dynamic inventory script that queries the `pi-registrar`'s `/ansible_inventory` endpoint.
+        *   Allows administrators to run playbooks to configure Pis (e.g., update WiFi, API keys, manage files).
 
 ## Setup and Installation
 
-Follow these steps to set up an AeroScan monitoring node on a Raspberry Pi:
+This project involves setting up a Central Server and one or more Raspberry Pi nodes.
 
-1.  **Prepare Raspberry Pi OS:**
-    * Download the latest Raspberry Pi OS Lite (64-bit recommended for newer models).
-    * Flash the OS onto the MicroSD card using Raspberry Pi Imager.
-    * Use the pre-configured images, 64 bit is designed for eduroam and 32 bit is designed for eduroam2.4-legacy
-2.  **Initial Boot & Configuration:**
-    * Insert the SD card into the Pi and power it on.
-3.  **Install Dependencies:**
-    * Install Python 3 pip and necessary tools:
+### A. Central Server Setup (Ubuntu Recommended)
+
+1.  **Prerequisites:**
+    *   An Ubuntu server (or other Linux distribution capable of running Docker and Ansible).
+    *   Docker and Docker Compose installed.
         ```bash
+        # Example for Ubuntu:
         sudo apt update
-        sudo apt install -y python3-pip git iw speedtest-cli
-        # Add any other system dependencies required by your scripts
+        sudo apt install -y docker.io docker-compose
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        sudo usermod -aG docker $USER # Add your user to docker group, then log out/in
         ```
-    * Install required Python libraries:
-        ```bash
-        # Navigate to the cloned repo directory first (see step 4)
-        # Example: pip3 install -r requirements.txt
-        # (Create a requirements.txt file listing libraries like 'prometheus_client', etc.)
-        ```
+    *   Ansible installed (see "C. Ansible for Configuration Management" section below or install directly).
+    *   Git installed (`sudo apt install -y git`).
+    *   OpenSSL installed (usually present, for certificate generation).
 
-4.  **Clone AeroScan Repository:**
+2.  **Clone AeroScan Repository:**
     ```bash
-    git clone [https://github.com/Aero-Scan/AeroScan.git](https://github.com/Aero-Scan/AeroScan.git)
+    git clone https://github.com/Aero-Scan/AeroScan.git
     cd AeroScan
     ```
 
-5.  **Configure AeroScan Script:**
-    * (Describe any necessary configuration steps here - e.g., editing a config file, setting environment variables for target ping hosts, Prometheus endpoint details, etc.)
-    * Ensure the script has execute permissions if needed (`chmod +x your_script.py`).
+3.  **Run Server Setup Script:**
+    This script generates SSL certificates for `pi-registrar` and an `.env` file with the API key for Pi registration.
+    ```bash
+    chmod +x setup_server.sh
+    ./setup_server.sh
+    ```
+    *   Follow the prompts (e.g., for Server IP to embed in the certificate's Subject Alternative Name).
+    *   Note the `PI_REGISTER_API_KEY` generated – you'll need this for the Raspberry Pis.
+    *   This will create/populate:
+        *   `Docker/config/certs/` (pi-registrar's cert and key)
+        *   `Docker/config/prometheus_certs/` (copy of pi-registrar's public cert for Prometheus)
+        *   `ansible/config/` (copy of pi-registrar's public cert for Ansible inventory script)
+        *   `Docker/.env` (with `PI_REGISTER_API_KEY`)
 
-6.  **Setup Prometheus:**
-    * Install Prometheus on a central server (or another Pi).
-    * Configure Prometheus (`prometheus.yml`) to scrape the metrics endpoint exposed by the Python script on each AeroScan Pi (e.g., `http://<aeroscan_pi_ip>:<port>/metrics`).
-    * Example scrape config:
-      ```yaml
-      scrape_configs:
-        - job_name: 'aeroscan_nodes'
-          static_configs:
-            - targets: ['<pi1_ip>:<port>', '<pi2_ip>:<port>'] # Replace with actual IPs/ports
-      ```
+4.  **Start Docker Services:**
+    Navigate to the Docker directory and start the services:
+    ```bash
+    cd Docker/
+    docker-compose up -d --build
+    ```
+    *   Verify services are running: `docker-compose ps`
+    *   Check logs if needed: `docker-compose logs pi-registrar`, `docker-compose logs prometheus`.
 
-7.  **Setup Grafana:**
-    * Install Grafana on a central server.
-    * Add Prometheus as a data source in Grafana.
-    * Import or create a Grafana dashboard to visualize the metrics collected (e.g., signal strength over time, ping latency, bandwidth). (Consider exporting your dashboard as JSON and adding it to the repo).
+5.  **Configure Grafana:**
+    *   Access Grafana at `http://<your_server_ip>:3000` (default admin/admin, change password).
+    *   Add Prometheus as a data source:
+        *   URL: `http://prometheus:9090` (uses Docker's internal DNS).
+        *   Click "Save & Test".
+    *   Create or import dashboards to visualize AeroScan metrics.
 
-8.  **Run the Monitoring Script:**
-    * **Manually:** `python3 /path/to/your/aeroscan_script.py`
-    * **As a Service (Recommended):** Create a systemd service file to run the script automatically on boot and restart it if it fails.
-        * Create `/etc/systemd/system/aeroscan.service`:
-          ```ini
-          [Unit]
-          Description=AeroScan Network Monitor
-          After=network.target
+### B. Raspberry Pi Node Setup
 
-          [Service]
-          User=pi # Or another user
-          WorkingDirectory=/home/pi/AeroScan # Adjust path
-          ExecStart=/usr/bin/python3 /home/pi/AeroScan/your_script.py # Adjust path
-          Restart=always
+This assumes you have a custom Raspberry Pi OS image that:
+*   Is based on a Debian-derived system (like Raspberry Pi OS).
+*   Has networking configured to connect to your network (e.g., Ethernet or initial WiFi).
+*   Has `git` installed.
+*   On boot, automatically clones/pulls the AeroScan repository (e.g., into `~/AeroScan`) and runs `~/AeroScan/pi/software/main.py`.
+*   The user running `main.py` (e.g., `pi` or `aeroscan`) has necessary permissions.
 
-          [Install]
-          WantedBy=multi-user.target
-          ```
-        * Enable and start the service:
-          ```bash
-          sudo systemctl enable aeroscan.service
-          sudo systemctl start aeroscan.service
-          sudo systemctl status aeroscan.service
-          ```
+**1. Required Packages on the Raspberry Pi Image:**
+Ensure these are installed (can be part of your image build process or installed manually once):
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip git network-manager wireless-tools iproute2
+# For main.py Python dependencies:
+sudo pip3 install prometheus-client speedtest-cli RPi.GPIO requests urllib3
+```
+*   **NetworkManager is crucial** if `main.py` uses `nmcli` for WiFi scanning and you plan to manage WiFi with Ansible via `nmcli`. Ensure it's the active network management service (this might involve disabling `dhcpcd`).
+
+**2. Configuration Files on Each Raspberry Pi:**
+These files need to be created in `/var/local/` on each Pi. This can be done manually for initial setup, or ideally, managed by Ansible.
+
+*   **(Required) Registrar URL Configuration:**
+    *   File: `/var/local/network_monitor_registrar_url.txt`
+    *   Content: The HTTPS URL of your `pi-registrar` service.
+        ```
+        https://<YOUR_CENTRAL_SERVER_IP_OR_DNS>:5001/register
+        ```
+        (Replace `<YOUR_CENTRAL_SERVER_IP_OR_DNS>` with the IP/hostname you configured in the certificate SAN during `setup_server.sh`).
+
+*   **(Required) API Key for Registration:**
+    *   File: `/var/local/network_monitor_api_key.txt`
+    *   Content: The exact `PI_REGISTER_API_KEY` generated by `setup_server.sh` (from `Docker/.env` on the server).
+        ```
+        your_generated_api_key_from_server
+        ```
+
+*   **(Required for HTTPS) Server Certificate:**
+    *   Copy the public certificate of your `pi-registrar` service from the server to the Pi.
+    *   Source on server: `AeroScan/Docker/config/certs/cert.pem`
+    *   Destination on Pi: `/etc/ssl/certs/pi_registrar_server.pem` (this path is referenced in `main.py`).
+    *   **Manual Copy Example (run from server):**
+        ```bash
+        scp ~/AeroScan/Docker/config/certs/cert.pem <pi_user>@<pi_ip>:/tmp/cert.pem
+        ```
+    *   **Then on the Pi:**
+        ```bash
+        sudo mv /tmp/cert.pem /etc/ssl/certs/pi_registrar_server.pem
+        sudo chown root:root /etc/ssl/certs/pi_registrar_server.pem
+        sudo chmod 644 /etc/ssl/certs/pi_registrar_server.pem
+        ```
+        (This step is a prime candidate for automation with Ansible later).
+
+*   **(Optional) RPi Connect Device Name (if using that Grafana link feature):**
+    *   File: `/var/local/rpi_connect_device_name.txt`
+    *   Content: The name you assigned this Pi in your `connect.raspberrypi.com` dashboard.
+        ```
+        MyLivingRoomPi
+        ```
+
+**3. `main.py` Execution:**
+Your image's boot process should:
+1.  Navigate to the cloned `AeroScan/pi/software/` directory.
+2.  Execute `python3 main.py`.
+It's highly recommended to run `main.py` as a systemd service for reliability and auto-restarts. Create a file like `/etc/systemd/system/aeroscan.service`:
+```ini
+[Unit]
+Description=AeroScan Network Monitor
+Wants=network-online.target
+After=network-online.target git-pull-aeroscan.service # Example: ensure network is up and git pull (if separate service) ran
+
+[Service]
+User=aeroscan # Or 'pi', the user running the script
+Group=aeroscan # Or 'pi'
+WorkingDirectory=/home/aeroscan/AeroScan/pi/software # Adjust to your clone path
+ExecStart=/usr/bin/python3 /home/aeroscan/AeroScan/pi/software/main.py
+Restart=always
+RestartSec=10
+# Optional: StandardOutput=journal, StandardError=journal for logging
+
+[Install]
+WantedBy=multi-user.target
+```
+Then enable and start it: `sudo systemctl enable aeroscan.service && sudo systemctl start aeroscan.service`. (You might need a separate service/script for the `git pull` part if it's complex or needs to happen before this service starts).
+
+### C. Ansible for Configuration Management (Setup on Central Server)
+
+1.  **Install Ansible (if not already done during server prerequisites):**
+    ```bash
+    sudo apt update && sudo apt install -y ansible
+    ```
+
+2.  **Prepare SSH Key-Based Access to Pis:**
+    *   On your central server (`it06`), ensure you have an SSH key pair (`~/.ssh/id_rsa`, `~/.ssh/id_rsa.pub`). If not, run `ssh-keygen`.
+    *   Copy the server's public key to each Raspberry Pi for the user Ansible will connect as (e.g., `aeroscan`):
+        ```bash
+        # On server:
+        ssh-copy-id aeroscan@<pi_ip_or_hostname>
+        ```
+
+3.  **Dynamic Inventory Script (`AeroScan/ansible/inventory_from_registrar.py`):**
+    *   This script is included in the repository.
+    *   Ensure it's executable: `chmod +x ~/AeroScan/ansible/inventory_from_registrar.py`.
+    *   It expects the `pi-registrar`'s public certificate at `~/AeroScan/ansible/config/pi_registrar_server.pem` (this is copied by `setup_server.sh`).
+    *   It uses `https://AeroScan:5001/targets` by default. Ensure `AeroScan` resolves to your server's IP on the Ansible control node (e.g., add `<your_server_ip> AeroScan` to `/etc/hosts` on the control node if not a public DNS name).
+
+4.  **Ansible Configuration (`AeroScan/ansible/ansible.cfg`):**
+    This file should be present in `AeroScan/ansible/` and point to your dynamic inventory:
+    ```ini
+    [defaults]
+    inventory         = ./inventory_from_registrar.py
+    host_key_checking = False ; For trusted local networks; set to True for stricter security.
+    deprecation_warnings = False
+
+    [privilege_escalation]
+    become            = True
+    become_method     = sudo
+    # become_ask_pass = False ; Assumes passwordless sudo is configured on Pis for the ansible_user
+    ```
+
+5.  **Passwordless Sudo on Pis for Ansible User:**
+    For Ansible to manage system settings (like `nmcli` for WiFi), the user it connects as (e.g., `aeroscan`) needs passwordless `sudo` rights on the Pis for specific commands. Edit `/etc/sudoers` on each Pi using `sudo visudo`:
+    *   Example for user `aeroscan` needing `nmcli` and `systemctl`:
+        `aeroscan ALL=(ALL) NOPASSWD: /usr/bin/nmcli, /bin/systemctl`
+    *   Or for all commands (less secure):
+        `aeroscan ALL=(ALL) NOPASSWD: ALL`
+
+6.  **Run Ansible Playbooks:**
+    Navigate to `AeroScan/ansible/` and run playbooks:
+    ```bash
+    cd ~/AeroScan/ansible/
+    ansible-playbook playbooks/your_playbook_name.yml
+    ```
+    (Start with `playbooks/test_create_file.yml` to confirm setup).
 
 ## Usage
 
-Once set up, the AeroScan Raspberry Pi node will automatically collect network data and expose it for Prometheus to scrape.
-
-* **Accessing Data:** View the collected metrics and network status via the configured Grafana dashboard.
-* **Troubleshooting:** Connect to individual Raspberry Pi nodes via SSH for maintenance or log checking (e.g., `journalctl -u aeroscan.service`).
-
-## Configuration
-
-*(Detail specific configuration options here. Examples:)*
-
-* **`config.ini` / `.env`:** Explain any configuration files used by the script.
-    * `TARGET_HOSTS`: Comma-separated list of hosts/IPs to ping.
-    * `PROMETHEUS_PORT`: Port number for the metrics endpoint.
-    * `SCAN_INTERVAL_SECONDS`: How often to run the data collection.
-* **Prometheus (`prometheus.yml`):** Ensure the `scrape_configs` section includes targets for all active AeroScan nodes.
-* **Grafana:** Configure the Prometheus data source and set up dashboard panels.
+*   **Central Server:** The Docker services (Prometheus, Grafana, pi-registrar) run continuously.
+*   **Raspberry Pi Nodes:** The `main.py` script collects and exposes metrics. It registers with `pi-registrar`.
+*   **Monitoring:** Access Grafana at `http://<your_server_ip>:3000` to view dashboards.
+*   **Configuration:** Use Ansible playbooks from the central server to manage Pis.
+*   **Troubleshooting:**
+    *   Check `docker-compose logs <service_name>` on the server.
+    *   Check `main.py` output or systemd service logs (`journalctl -u aeroscan.service` if set up) on the Pis.
+    *   Use Ansible ad-hoc commands or playbooks for diagnostics.
 
 ## License
 
@@ -170,12 +294,11 @@ AeroScan is licensed under the **Creative Commons Attribution-NonCommercial-Shar
 
 You are free to **share** (copy and redistribute the material in any medium or format) and **adapt** (remix, transform, and build upon the material) under the following terms:
 
-* **Attribution** — You must give [appropriate credit](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-appropriate-credit), provide a link to the license, and [indicate if changes were made](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-indicate-changes). You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
-* **NonCommercial** — You may not use the material for [commercial purposes](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-commercial-purposes).
-* **ShareAlike** - If you remix, transform, or build upon the material, you must distribute your contributions under the [same license](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-same-license) as the original.
-* **No additional restrictions** — You may not apply legal terms or [technological measures](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-technological-measures) that legally restrict others from doing anything the license permits.
+*   **Attribution** — You must give [appropriate credit](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-appropriate-credit), provide a link to the license, and [indicate if changes were made](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-indicate-changes). You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
+*   **NonCommercial** — You may not use the material for [commercial purposes](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-commercial-purposes).
+*   **ShareAlike** - If you remix, transform, or build upon the material, you must distribute your contributions under the [same license](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-same-license) as the original.
+*   **No additional restrictions** — You may not apply legal terms or [technological measures](https://creativecommons.org/licenses/by-nc-sa/4.0/#ref-technological-measures) that legally restrict others from doing anything the license permits.
 
 For more information, see the [full license text](LICENSE) in this repository or visit:
 [https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-
-
+```
