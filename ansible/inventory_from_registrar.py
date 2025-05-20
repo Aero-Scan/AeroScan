@@ -39,7 +39,7 @@ def get_inventory_from_targets():
     inventory = {
         "_meta": {"hostvars": {}},
         "pis": {"hosts": [], "vars": {
-            "ansible_user": "pi",
+            "ansible_user": "aeroscan",
             "ansible_ssh_private_key_file": os.path.expanduser("~/.ssh/id_rsa"),
             "ansible_python_interpreter": "/usr/bin/python3",
             "ansible_become": True,
