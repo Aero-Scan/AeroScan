@@ -1,0 +1,40 @@
+---
+- name: Test Ansible Connectivity and File Creation
+  hosts: pis # Targets the 'pis' group from your dynamic inventory
+  gather_facts: false # We don't need to gather facts for this simple test
+
+  # vars: # You can define variables here if needed for the filename or content
+  #   test_file_path: "/tmp/ansible_test_file.txt" # Path on the Raspberry Pi
+  #   test_file_content: "Ansible was here successfully on {{ ansible_date_time.iso8601 }}!"
+
+  tasks:
+    - name: Define test file variables (alternative way)
+      ansible.builtin.set_fact:
+        test_file_path: "/tmp/ansible_test_{{ inventory_hostname }}.txt" # Unique file per host
+        test_file_content: "Ansible successfully connected to {{ inventory_hostname }} at {{ ansible_date_time.iso8601 }}!"
+
+    - name: Ensure the /tmp directory exists (usually does, but good practice)
+      ansible.builtin.file:
+        path: /tmp
+        state: directory
+        mode: '0777' # /tmp is typically world-writable
+
+    - name: Create a test file in /tmp on each Pi
+      ansible.builtin.copy:
+        content: "{{ test_file_content }}"
+        dest: "{{ test_file_path }}"
+        owner: "{{ ansible_user }}" # The user Ansible connects as (e.g., 'pi')
+        group: "{{ ansible_user }}"
+        mode: '0644'
+      # become: true # Only uncomment if writing to a location that needs root AND ansible_user can't write there
+      # For /tmp, 'become: true' is usually not needed if ansible_user is 'pi'
+
+    - name: (Optional) Read back the file content to verify
+      ansible.builtin.slurp:
+        src: "{{ test_file_path }}"
+      register: file_content_slurped
+
+    - name: (Optional) Display the file content
+      ansible.builtin.debug:
+        msg: "Content of {{ test_file_path }} is: {{ file_content_slurped.content | b64decode }}"
+      when: file_content_slurped is defined and file_content_slurped.content is defined
