@@ -240,27 +240,57 @@ def run_speedtest_child(result_queue, interface_to_use_for_source_ip=None):
         print(f"  Speedtest process failed unexpectedly: {e}")
     finally:
         result_queue.put(result_data)
+def get_nmcli_header_map(header_line_content):
+    """
+    Creates a map of column names to indices from nmcli header line.
+    This version assumes the 'IN-USE' column might be present or effectively empty.
+    The map will be for the columns that reliably appear *after* any IN-USE marker.
+    """
+    # Remove potential "IN-USE" header text to align with data lines that might not have a visible first column
+    # if they are not the active connection.
+    temp_header = header_line_content.strip()
+    if temp_header.upper().startswith("IN-USE"):
+        temp_header = re.sub(r"^\S+\s+", "", temp_header, count=1) # Remove first word + spaces
+
+    headers_raw = re.split(r'\s{2,}', temp_header)
+    header_map = {name.upper().strip(): i for i, name in enumerate(headers_raw)}
+
+    # print(f"  DEBUG get_nmcli_header_map: Raw Header (post IN-USE strip): '{temp_header}', Final Map: {header_map}")
+
+    required_data_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"] # These are keys we expect in the map
+    missing = [h for h in required_data_headers if h not in header_map]
+    if missing:
+        print(f"  Error: nmcli header output (after attempting to strip IN-USE) missing one of required data headers: {missing}.")
+        print(f"  Original header line: '{header_line_content}'")
+        print(f"  Processed header for mapping: '{temp_header}'")
+        print(f"  Parsed header map: {header_map}")
+        return None
+    return header_map
+
 
 def parse_nmcli_wifi_line(line_content, header_map):
     """
     Parses a single data line of 'nmcli dev wifi list' output.
-    Assumes line_content is a clean data line (e.g., IN-USE '*' already handled if necessary).
     """
     ap = {}
-    parts = re.split(r'\s{2,}', line_content.strip())
+    line_to_parse = line_content.strip()
+    in_use_marker = False
 
-    # Debug: Print what's being processed
-    print(f"  DEBUG parse_nmcli_wifi_line: Parts after split: {parts} for line: '{line_content}'")
-    print(f"  DEBUG parse_nmcli_wifi_line: Using header_map: {header_map}")
+    if line_to_parse.startswith("*"):
+        in_use_marker = True
+        # Remove the '*' and the spaces immediately following it before splitting
+        line_to_parse = re.sub(r"^\*\s+", "", line_to_parse, count=1)
 
+    # Now, line_to_parse should consistently start with BSSID (or what nmcli puts there)
+    parts = re.split(r'\s{2,}', line_to_parse)
+
+    # print(f"  DEBUG parse_nmcli_wifi_line: Line to parse='{line_to_parse}', Parts='{parts}', HeaderMap='{header_map}'")
 
     try:
         def get_part(field_name):
-            idx = header_map.get(field_name.upper())
+            idx = header_map.get(field_name.upper()) # header_map now based on columns *after* IN-USE
             if idx is not None and idx < len(parts):
-                # print(f"    DEBUG: For {field_name}, idx={idx}, part='{parts[idx]}'")
                 return parts[idx]
-            # print(f"    DEBUG: For {field_name}, idx={idx} (None or out of bounds for len={len(parts)})")
             return None
 
         ap['bssid'] = get_part("BSSID")
@@ -278,63 +308,22 @@ def parse_nmcli_wifi_line(line_content, header_map):
             ap['signal_dbm'] = -102 # Missing signal quality
 
         current_ssid = ap.get('ssid')
-        if current_ssid == '--' or not current_ssid: # Handle empty or '--' SSIDs
+        if current_ssid == '--' or not current_ssid:
             ap['ssid'] = '<hidden_or_empty>'
 
-        # Validate essential fields before returning
         if not ap.get('bssid') or not ap.get('channel') or 'signal_dbm' not in ap:
-            # print(f"  DEBUG parse_nmcli_wifi_line: Failed validation (missing fields): {ap}")
+            # print(f"  DEBUG parse_nmcli_wifi_line: Failed validation: {ap} from line '{line_content}'")
             return None
 
     except (IndexError, ValueError) as e:
-        # print(f"  DEBUG parse_nmcli_wifi_line: Exception during parsing: {e} for line: {line_content}")
+        # print(f"  DEBUG parse_nmcli_wifi_line: Exception: {e} for line '{line_content}'")
         return None
 
-    # print(f"  DEBUG parse_nmcli_wifi_line: Successfully parsed: {ap}")
+    # print(f"  DEBUG parse_nmcli_wifi_line: Successfully parsed: {ap} from line '{line_content}'")
     return ap
 
 
-def get_nmcli_header_map(header_line_content):
-    """
-    Creates a map of column names to indices from nmcli header line.
-    Handles potential 'IN-USE' column.
-    """
-    # The first "word" might be IN-USE or just the start of BSSID if IN-USE is empty
-    # Split by multiple spaces
-    headers_raw = re.split(r'\s{2,}', header_line_content.strip())
-
-    header_map = {}
-    actual_headers_started = False
-    current_index_offset = 0
-
-    # Handle the IN-USE column specifically, as it might be empty or contain '*'
-    # Your provided output has "IN-USE" as the first distinct column name.
-    if headers_raw and headers_raw[0].upper() == "IN-USE":
-        header_map["IN-USE"] = 0 # Map it, though we don't use its data directly
-        # The actual data columns we care about start after "IN-USE"
-        processed_headers = headers_raw[1:] # Headers for BSSID onwards
-        current_index_offset = 1 # Data parts will be offset by 1
-    else:
-        # If "IN-USE" is not the first column, assume headers_raw starts with BSSID
-        processed_headers = headers_raw
-
-    for i, name in enumerate(processed_headers):
-        clean_name = name.upper().strip()
-        if clean_name:
-             header_map[clean_name] = i + current_index_offset # Adjust index if IN-USE was present
-
-    print(f"  DEBUG get_nmcli_header_map: Raw Headers: {headers_raw}, Processed Headers: {processed_headers}, Final Map: {header_map}")
-
-    required_data_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"]
-    missing = [h for h in required_data_headers if h not in header_map]
-    if missing:
-        print(f"  Error: nmcli header output missing one of required data headers: {missing}.")
-        print(f"  Raw header line processed: '{header_line_content}'")
-        print(f"  Parsed header map: {header_map}")
-        return None
-    return header_map
-
-
+# scan_wifi_aps_nmcli remains largely the same, it just calls the updated helpers
 def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
     if not interface:
         print("  Skipping nmcli WiFi scan: No wireless interface configured.")
@@ -349,100 +338,71 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
         print(f"  Triggering Wi-Fi rescan on {interface}...")
         subprocess.run(rescan_cmd, capture_output=True, text=True, check=False, timeout=10)
         print(f"  Rescan command sent. Waiting a moment for APs to appear...")
-        time.sleep(4) # Slightly increased sleep
+        time.sleep(4)
     except subprocess.TimeoutExpired:
         print(f"  nmcli rescan command timed out for {interface}.")
     except FileNotFoundError:
         print("  Error: 'nmcli' command not found for rescan.")
-        WIFI_AP_SIGNAL.clear()
-        return
+        WIFI_AP_SIGNAL.clear(); return
     except Exception as e:
         print(f"  Unexpected error during nmcli rescan: {e}")
 
     list_cmd = ["nmcli", "dev", "wifi", "list", "ifname", interface]
-    output_lines = [] # Initialize
+    output_lines = []
     header_map = None
     try:
         result = subprocess.run(list_cmd, capture_output=True, text=True, check=True, timeout=15)
         output_lines = result.stdout.strip().splitlines()
 
         if not output_lines:
-            print("  nmcli output is empty after rescan.")
-            WIFI_AP_SIGNAL.clear()
-            return
+            print("  nmcli output is empty after rescan."); WIFI_AP_SIGNAL.clear(); return
 
-        # First non-empty line is the header
         header_line_content = output_lines[0]
         data_lines_start_index = 1
 
         header_map = get_nmcli_header_map(header_line_content)
         if not header_map:
-            WIFI_AP_SIGNAL.clear()
-            print("  DEBUG scan_wifi_aps_nmcli: Failed to get header map.")
-            return
+            WIFI_AP_SIGNAL.clear(); print("  Failed to get header map from nmcli output."); return
 
-        # Process data lines
-        for line_idx, line_content in enumerate(output_lines[data_lines_start_index:]):
-            # The line for the connected AP starts with `* ` (star and a space)
-            # Other lines might start with spaces if IN-USE is empty.
-            # `strip()` in `parse_nmcli_wifi_line` handles leading/trailing spaces for the whole line.
-            # The `re.split(r'\s{2,}', ...)` handles the column separation.
-
-            # The crucial part is that `parse_nmcli_wifi_line` now correctly uses the indices
-            # from `header_map` to access the correct elements in `parts`.
-
-            print(f"  DEBUG scan_wifi_aps_nmcli: Processing data line {line_idx + data_lines_start_index}: '{line_content}'")
+        for line_content in output_lines[data_lines_start_index:]:
             ap_data = parse_nmcli_wifi_line(line_content, header_map)
             if ap_data:
                 aps.append(ap_data)
-            # else:
-                # print(f"  DEBUG scan_wifi_aps_nmcli: No valid AP data from line: '{line_content}'")
 
-
-    except subprocess.TimeoutExpired:
-        print(f"  nmcli list command timed out for {interface}")
-    except subprocess.CalledProcessError as e:
-        print(f"  Failed to run nmcli list on {interface}: {e}. Output: {e.stderr.strip()}")
-    except FileNotFoundError:
-        print("  Error: 'nmcli' command not found for listing.")
-    except Exception as e:
-        print(f"  Error during WiFi AP list with nmcli: {e}")
+    except subprocess.TimeoutExpired: print(f"  nmcli list command timed out for {interface}")
+    except subprocess.CalledProcessError as e: print(f"  Failed to run nmcli list: {e}. Output: {e.stderr.strip()}")
+    except FileNotFoundError: print("  Error: 'nmcli' command not found for listing.")
+    except Exception as e: print(f"  Error during WiFi AP list with nmcli: {e}")
 
     WIFI_AP_SIGNAL.clear()
     reported_bssids = set()
     valid_aps_count = 0
 
-    if not aps and output_lines and header_map: # If we had output & header, but no APs parsed
-        print("  Warning: nmcli returned data, but no APs were successfully parsed into the list.")
-    elif not aps: # General case for no APs
+    if not aps and output_lines and header_map:
+        print("  Warning: nmcli returned data, but no APs were successfully parsed.")
+    elif not aps:
         print("  No AP data collected from nmcli scan.")
 
-
-    for ap_dict_item in aps: # Renamed to avoid conflict with outer 'ap'
+    for ap_dict_item in aps:
         if ap_dict_item.get('bssid') and ap_dict_item['bssid'] not in reported_bssids:
             try:
-                # Ensure all necessary keys exist from parsing, though parse_nmcli_wifi_line should ensure this
                 if not all(k in ap_dict_item for k in ('ssid', 'bssid', 'channel', 'signal_dbm')):
-                    # print(f"  DEBUG scan_wifi_aps_nmcli: Skipping item due to missing keys: {ap_dict_item}")
                     continue
 
                 sanitized_ssid = re.sub(r'[^a-zA-Z0-9_:]', '_', ap_dict_item['ssid'])
-                if not sanitized_ssid:
-                    sanitized_ssid = "_invalid_ssid_chars_"
+                if not sanitized_ssid: sanitized_ssid = "_invalid_ssid_chars_"
 
                 WIFI_AP_SIGNAL.labels(
-                    ssid=sanitized_ssid,
-                    bssid=ap_dict_item['bssid'],
-                    channel=str(ap_dict_item['channel'])
+                    ssid=sanitized_ssid, bssid=ap_dict_item['bssid'], channel=str(ap_dict_item['channel'])
                 ).set(ap_dict_item['signal_dbm'])
                 reported_bssids.add(ap_dict_item['bssid'])
                 valid_aps_count += 1
             except Exception as label_err:
-                print(f"  Error setting label for AP {ap_dict_item.get('ssid','N/A')} (BSSID: {ap_dict_item.get('bssid','N/A')}). Error: {label_err}")
+                print(f"  Error setting label for AP {ap_dict_item.get('ssid','N/A')}. Error: {label_err}")
 
     print(f"  nmcli scan: Found and processed {valid_aps_count} unique APs after rescan.")
-    if not valid_aps_count and len(output_lines) > 1 : # If we had output lines but processed none
-        print("  No APs were successfully processed into metrics from nmcli output, though data was present.")
+    if not valid_aps_count and len(output_lines) > 1 :
+        print("  No APs were successfully processed into metrics, though nmcli output was present.")
 
 def update_device_ip(interface_to_check):
     global current_ip_labels
