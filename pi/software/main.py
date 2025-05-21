@@ -70,6 +70,10 @@ UPLOAD_SPEED = Gauge('upload_speed_mbps', 'Upload speed in Mbps')
 WIFI_AP_SIGNAL = Gauge('wifi_ap_signal_strength_dbm', 'Signal strength of nearby WiFi APs (via nmcli)', ['ssid', 'bssid', 'channel'])
 DEVICE_IDENTIFIER = Gauge('device_unique_identifier', 'Unique identifier for the device (SN-Base64Timestamp)', ['identifier'])
 NETWORK_INTERFACE_INFO = Gauge('network_interface_info', 'Basic network interface information (IP Address)', ['interface', 'ip_address'])
+SIGNAL_STRENGTH = Gauge('signal_strength_dbm', 'Signal strength of connected network in dBm (via iwconfig)')
+LINK_QUALITY = Gauge('link_quality_percentage', 'Link quality of connected network in percentage (via iwconfig)')
+
+NETWORK_JITTER = Gauge('network_jitter_ms', 'Network jitter in ms (calculated from 5 packets)')
 
 # --- New Prometheus Gauges for Connected AP Details ---
 # Stores labels of the currently connected AP for metric removal on change
@@ -77,17 +81,11 @@ NETWORK_INTERFACE_INFO = Gauge('network_interface_info', 'Basic network interfac
 current_ap_metric_labels = {}
 
 # Gauge for information about the AP the interface is currently connected to
-CONNECTED_AP_DETAILS = Gauge('network_interface_connected_ap_details',
-                             'Details of the Access Point the interface is connected to',
-                             ['interface', 'bssid', 'ssid', 'channel'])
+CONNECTED_AP_DETAILS = Gauge('network_interface_connected_ap_details', 'Details of the Access Point the interface is connected to', ['interface', 'bssid', 'ssid', 'channel'])
 # Gauge for signal strength of the connected AP
-CONNECTED_AP_SIGNAL = Gauge('network_interface_connected_ap_signal_dbm',
-                            'Signal strength (dBm) of the AP the interface is connected to',
-                            ['interface', 'bssid', 'ssid'])
+CONNECTED_AP_SIGNAL = Gauge('network_interface_connected_ap_signal_dbm', 'Signal strength (dBm) of the AP the interface is connected to', ['interface', 'bssid', 'ssid'])
 # Gauge for link quality of the connected AP
-CONNECTED_AP_QUALITY = Gauge('network_interface_connected_ap_link_quality_percentage',
-                             'Link quality (%) of the connection to the AP',
-                             ['interface', 'bssid', 'ssid'])
+CONNECTED_AP_QUALITY = Gauge('network_interface_connected_ap_link_quality_percentage', 'Link quality (%) of the connection to the AP', ['interface', 'bssid', 'ssid'])
 
 # --- Global Variables ---
 current_device_id_label = None
