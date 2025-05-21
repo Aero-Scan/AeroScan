@@ -10,7 +10,7 @@ import RPi.GPIO as GPIO
 import os
 import base64
 import requests # For HTTP API reporting
-import urllib3 # To potentially suppress InsecureRequestWarning if verify=False
+import urllib3 # For disabling SSL warnings if needed
 
 # --- Configuration ---
 PROMETHEUS_PORT = 8000
@@ -41,6 +41,7 @@ DEFAULT_REGISTRAR_API_URL = "https://PLEASE_CONFIGURE_IN_FILE:5001/register"
 REGISTRAR_API_URL = DEFAULT_REGISTRAR_API_URL
 
 # Path to the server's public certificate on the Pi (for HTTPS verification)
+# This file must be copied from the server (Docker host) to this Pi.
 SERVER_CERT_PATH_ON_PI = "/etc/ssl/certs/pi_registrar_server.pem"
 
 # Report to registrar every 5 minutes (heartbeat)
@@ -70,6 +71,24 @@ WIFI_AP_SIGNAL = Gauge('wifi_ap_signal_strength_dbm', 'Signal strength of nearby
 DEVICE_IDENTIFIER = Gauge('device_unique_identifier', 'Unique identifier for the device (SN-Base64Timestamp)', ['identifier'])
 NETWORK_INTERFACE_INFO = Gauge('network_interface_info', 'Basic network interface information (IP Address)', ['interface', 'ip_address'])
 
+# --- New Prometheus Gauges for Connected AP Details ---
+# Stores labels of the currently connected AP for metric removal on change
+# Format: { 'interface_name': {'bssid': 'xx', 'ssid': 'yy', 'channel': 'cc'}, ... }
+current_ap_metric_labels = {}
+
+# Gauge for information about the AP the interface is currently connected to
+CONNECTED_AP_DETAILS = Gauge('network_interface_connected_ap_details',
+                             'Details of the Access Point the interface is connected to',
+                             ['interface', 'bssid', 'ssid', 'channel'])
+# Gauge for signal strength of the connected AP
+CONNECTED_AP_SIGNAL = Gauge('network_interface_connected_ap_signal_dbm',
+                            'Signal strength (dBm) of the AP the interface is connected to',
+                            ['interface', 'bssid', 'ssid'])
+# Gauge for link quality of the connected AP
+CONNECTED_AP_QUALITY = Gauge('network_interface_connected_ap_link_quality_percentage',
+                             'Link quality (%) of the connection to the AP',
+                             ['interface', 'bssid', 'ssid'])
+
 # --- Global Variables ---
 current_device_id_label = None
 raspberry_pi_serial = None
@@ -97,8 +116,8 @@ def get_ip_address_for_interface(interface_name):
         if ip_match:
             return ip_match.group(1)
     except Exception as e:
-        # Less verbose for a helper
-        print(f"  Could not get IP for {interface_name}: {e}")
+        # Less verbose for a helper, as this is called often
+        print(f"  Could not get IP for {interface_name} (helper function): {type(e).__name__}")
     return None
 
 def run_ping_checks(target=PING_TARGET, interface_to_use=None):
@@ -107,8 +126,7 @@ def run_ping_checks(target=PING_TARGET, interface_to_use=None):
     jitter = -1
 
     ping_cmd_base = ["ping", "-c", "5", "-w", "5", target]
-    # For logging
-    ping_cmd_display = " ".join(ping_cmd_base)
+    ping_cmd_display = " ".join(ping_cmd_base) # For logging
 
     if interface_to_use:
         print(f"Running ping checks to {target} via interface {interface_to_use}...")
@@ -155,43 +173,173 @@ def run_ping_checks(target=PING_TARGET, interface_to_use=None):
     NETWORK_TTL.set(ttl)
     NETWORK_JITTER.set(jitter)
 
-def update_wireless_metrics(interface=WIRELESS_INTERFACE):
-    # Default to very low signal if not found
-    signal_level = -100
-    quality_percentage = -1
-    # No wireless interface configured
+def unescape_nmcli_field(field_value):
+    """Removes backslash escaping from colons in nmcli terse output fields."""
+    if field_value is None:
+        return None
+    return field_value.replace('\\:', ':')
+
+def update_connected_ap_metrics(interface=WIRELESS_INTERFACE):
+    global current_ap_metric_labels
+
     if not interface:
         return
 
-    print(f"Checking connected wireless metrics for {interface} (iwconfig)...")
+    print(f"Updating connected AP metrics for {interface}...")
+
+    final_bssid = None
+    final_ssid = "<NotConnected>"
+    final_channel = "N/A"
+    final_signal_dbm = -100
+    final_link_quality_percent = 0
+
+    iwconfig_details = {}
+
+    # Step 1: Use iwconfig to get BSSID, Signal Strength (dBm), Link Quality
     try:
-        result = subprocess.run(
+        result_iwconfig = subprocess.run(
             ["iwconfig", interface],
-            capture_output=True, text=True, check=True, timeout=5
+            capture_output=True, text=True, check=False, timeout=5
         )
-        output = result.stdout
-        link_quality_match = re.search(r"Link Quality=(\d+)/(\d+)", output)
-        if link_quality_match:
-            q_curr, q_max = map(int, link_quality_match.groups())
-            quality_percentage = (q_curr / q_max * 100) if q_max > 0 else 0
-        signal_level_match = re.search(r"Signal level=(-?\d+)\s*dBm", output)
-        if signal_level_match:
-            signal_level = int(signal_level_match.group(1))
-        # Interface might not be wireless or not connected
-        elif "Signal level" not in output:
-            print(f"  No 'Signal level' found for {interface}. Is it a connected wireless interface?")
+        output_iwconfig = result_iwconfig.stdout
 
-    except subprocess.CalledProcessError:
-        print(f"  Failed to get iwconfig metrics for {interface} (is it up and wireless?).")
-    except subprocess.TimeoutExpired:
-        print(f"  iwconfig command timed out for {interface}")
-    except FileNotFoundError:
-        print("  Error: 'iwconfig' command not found. Is 'wireless-tools' installed?")
+        bssid_match = re.search(r"Access Point:\s*([0-9A-Fa-f:]{17})", output_iwconfig)
+        # Ensure BSSID is valid and not a placeholder for "not associated"
+        if bssid_match and bssid_match.group(1).upper() not in ["NOT-ASSOCIATED", "00:00:00:00:00:00"]:
+            iwconfig_details['bssid'] = bssid_match.group(1).upper()
+
+        signal_match = re.search(r"Signal level=(-?\d+)\s*dBm", output_iwconfig)
+        if signal_match:
+            iwconfig_details['signal_dbm'] = int(signal_match.group(1))
+
+        quality_match = re.search(r"Link Quality=(\d+)/(\d+)", output_iwconfig)
+        if quality_match:
+            q_curr, q_max = map(int, quality_match.groups())
+            iwconfig_details['link_quality_percent'] = (q_curr / q_max * 100) if q_max > 0 else 0
+
+        ssid_match_iwconfig = re.search(r'ESSID:"([^"]*)"', output_iwconfig)
+        if ssid_match_iwconfig and ssid_match_iwconfig.group(1):
+            iwconfig_details['ssid'] = ssid_match_iwconfig.group(1)
+
     except Exception as e:
-        print(f"  Unexpected error in update_wireless_metrics for {interface}: {e}")
+        print(f"  Error running/parsing iwconfig for {interface}: {e}")
 
-    LINK_QUALITY.set(quality_percentage)
-    SIGNAL_STRENGTH.set(signal_level)
+    # Prioritize iwconfig for these values if available
+    if iwconfig_details.get('bssid'):
+        final_bssid = iwconfig_details['bssid']
+        if 'ssid' in iwconfig_details:
+            final_ssid = iwconfig_details['ssid']
+        if 'signal_dbm' in iwconfig_details:
+            final_signal_dbm = iwconfig_details['signal_dbm']
+        if 'link_quality_percent' in iwconfig_details:
+            final_link_quality_percent = iwconfig_details['link_quality_percent']
+    else:
+        # If iwconfig shows not connected or fails to get BSSID, clear metrics and return
+        print(f"  {interface} not associated according to iwconfig or BSSID not found.")
+        last_labels_for_interface = current_ap_metric_labels.get(interface)
+        if last_labels_for_interface:
+            print(f"  Clearing metrics for previously connected AP on {interface}: {last_labels_for_interface.get('bssid')}")
+            try:
+                CONNECTED_AP_DETAILS.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'], last_labels_for_interface['ssid'], last_labels_for_interface['channel'])
+                CONNECTED_AP_SIGNAL.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'], last_labels_for_interface['ssid'])
+                CONNECTED_AP_QUALITY.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'], last_labels_for_interface['ssid'])
+            except KeyError: # Ok if some labels were already gone or never set
+                pass
+            except Exception as e:
+                print(f"  Error removing old AP metrics on disconnect: {e}")
+            current_ap_metric_labels[interface] = None
+        return # Exit function if not connected based on iwconfig BSSID
+
+    # Step 2: If connected (final_bssid is set), use nmcli to confirm/get SSID and Channel.
+    if final_bssid:
+        try:
+            # Request ACTIVE, BSSID, SSID, CHAN.
+            nmcli_cmd = ["nmcli", "-t", "-f", "ACTIVE,BSSID,SSID,CHAN", "dev", "wifi", "list", "ifname", interface, "--rescan", "no"]
+            result_nmcli_list = subprocess.run(nmcli_cmd, capture_output=True, text=True, check=True, timeout=7)
+
+            found_in_nmcli = False
+            for line in result_nmcli_list.stdout.strip().splitlines():
+                # Split into ACTIVE, BSSID, SSID, CHAN (max 4 parts due to split limit)
+                parts = line.split(':', 3)
+
+                if len(parts) == 4:
+                    nm_active = parts[0].strip().upper()
+                    nm_bssid_escaped = parts[1].strip()
+                    nm_ssid = unescape_nmcli_field(parts[2].strip())
+                    nm_chan = parts[3].strip()
+
+                    nm_bssid = unescape_nmcli_field(nm_bssid_escaped).upper()
+
+                    if nm_active == 'YES' and nm_bssid == final_bssid:
+                        if nm_ssid and nm_ssid != '--':
+                            final_ssid = nm_ssid
+                        elif not nm_ssid and final_ssid == "<NotConnected>":
+                            final_ssid = "<empty_ssid_nmcli>"
+
+                        if nm_chan and nm_chan != '--':
+                            final_channel = nm_chan
+
+                        # If iwconfig didn't give signal_dbm, try to get quality from nmcli if requested & convert
+                        # For now, we prioritize iwconfig's dBm signal.
+                        # If you add SIGNAL to nmcli_cmd's -f and parts split, you could use it here as fallback.
+                        found_in_nmcli = True
+                        break
+
+            if not found_in_nmcli:
+                print(f"  Warning: BSSID {final_bssid} (from iwconfig) not found as ACTIVE in nmcli list for {interface}.")
+                # If nmcli didn't confirm, ensure we use iwconfig's SSID if available and better than default
+                if final_ssid == "<NotConnected>" and iwconfig_details.get('ssid'):
+                    final_ssid = iwconfig_details['ssid']
+                elif final_ssid == "<NotConnected>": # If still not found by either
+                    final_ssid = "<SSID_not_found>"
+
+        except Exception as e:
+            print(f"  Error running/parsing nmcli list for connected AP details on {interface}: {e}")
+            # If nmcli fails, ensure we use iwconfig's SSID if available and better than default
+            if final_ssid == "<NotConnected>" and iwconfig_details.get('ssid'):
+                final_ssid = iwconfig_details['ssid']
+            elif final_ssid == "<NotConnected>":
+                 final_ssid = "<SSID_lookup_failed>"
+
+    # ----- Prometheus Metric Update Logic -----
+    last_labels_for_interface = current_ap_metric_labels.get(interface)
+
+    if final_bssid:
+        current_details_dict = {
+            'interface': interface, 'bssid': final_bssid,
+            'ssid': final_ssid, 'channel': final_channel
+        }
+        current_signal_quality_labels = {
+            'interface': interface, 'bssid': final_bssid, 'ssid': final_ssid
+        }
+
+        # Check if AP has changed or if it was previously disconnected
+        if not last_labels_for_interface or last_labels_for_interface.get('bssid') != final_bssid:
+            if last_labels_for_interface: # It means AP changed, so remove old metrics
+                print(f"  AP Changed for {interface}. Old: {last_labels_for_interface.get('bssid')}, New: {final_bssid}")
+                try:
+                    CONNECTED_AP_DETAILS.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'],
+                                                last_labels_for_interface['ssid'], last_labels_for_interface['channel'])
+                    CONNECTED_AP_SIGNAL.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'],
+                                               last_labels_for_interface['ssid'])
+                    CONNECTED_AP_QUALITY.remove(last_labels_for_interface['interface'], last_labels_for_interface['bssid'],
+                                                last_labels_for_interface['ssid'])
+                except KeyError:
+                    pass
+                except Exception as e:
+                    print(f"  Error removing old AP metrics: {e}")
+
+            CONNECTED_AP_DETAILS.labels(**current_details_dict).set(1)
+            print(f"  Connected to AP on {interface}: BSSID={final_bssid}, SSID='{final_ssid}', Chan={final_channel}")
+
+        # Always update potentially dynamic values
+        CONNECTED_AP_SIGNAL.labels(**current_signal_quality_labels).set(final_signal_dbm)
+        CONNECTED_AP_QUALITY.labels(**current_signal_quality_labels).set(final_link_quality_percent)
+
+        # Store the current labels for the next check
+        current_ap_metric_labels[interface] = current_details_dict
+        print(f"  Metrics for {interface} -> {final_ssid} ({final_bssid}): Signal={final_signal_dbm:.1f}dBm, Quality={final_link_quality_percent:.1f}%")
+    # The 'else' (not connected) part of this function was handled earlier if iwconfig shows not associated.
 
 def run_speedtest_child(result_queue, interface_to_use_for_source_ip=None):
     result_data = {'ping': -1, 'download': -1, 'upload': -1}
@@ -206,7 +354,6 @@ def run_speedtest_child(result_queue, interface_to_use_for_source_ip=None):
             print(f"  Using source IP {source_ip} (from {interface_to_use_for_source_ip}) for speedtest.")
     else:
         print("  Attempting speedtest using default OS IP selection...")
-
 
     try:
         print("  Starting speedtest process...")
@@ -240,55 +387,46 @@ def run_speedtest_child(result_queue, interface_to_use_for_source_ip=None):
         print(f"  Speedtest process failed unexpectedly: {e}")
     finally:
         result_queue.put(result_data)
+
 def get_nmcli_header_map(header_line_content):
     """
-    Creates a map of column names to indices from nmcli header line.
-    This version assumes the 'IN-USE' column might be present or effectively empty.
-    The map will be for the columns that reliably appear *after* any IN-USE marker.
+    Creates a map of column names to indices from nmcli header line for AP scanning.
+    Assumes the relevant data columns (BSSID, SSID etc.) appear after any IN-USE marker/column.
     """
-    # Remove potential "IN-USE" header text to align with data lines that might not have a visible first column
-    # if they are not the active connection.
     temp_header = header_line_content.strip()
+    # If "IN-USE" is the first distinct field, remove it to align with data parsing
     if temp_header.upper().startswith("IN-USE"):
-        temp_header = re.sub(r"^\S+\s+", "", temp_header, count=1) # Remove first word + spaces
+        # Remove the first "word" (IN-USE) and subsequent spaces
+        temp_header = re.sub(r"^\S+\s+", "", temp_header, count=1)
 
     headers_raw = re.split(r'\s{2,}', temp_header)
     header_map = {name.upper().strip(): i for i, name in enumerate(headers_raw)}
 
-    # print(f"  DEBUG get_nmcli_header_map: Raw Header (post IN-USE strip): '{temp_header}', Final Map: {header_map}")
-
-    required_data_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"] # These are keys we expect in the map
+    required_data_headers = ["BSSID", "SSID", "CHAN", "SIGNAL"]
     missing = [h for h in required_data_headers if h not in header_map]
     if missing:
-        print(f"  Error: nmcli header output (after attempting to strip IN-USE) missing one of required data headers: {missing}.")
-        print(f"  Original header line: '{header_line_content}'")
-        print(f"  Processed header for mapping: '{temp_header}'")
-        print(f"  Parsed header map: {header_map}")
+        print(f"  Error: nmcli AP scan header (after IN-USE strip) missing required fields: {missing}.")
+        print(f"  Original header: '{header_line_content}', Processed for map: '{temp_header}', Map: {header_map}")
         return None
     return header_map
 
-
 def parse_nmcli_wifi_line(line_content, header_map):
     """
-    Parses a single data line of 'nmcli dev wifi list' output.
+    Parses a single data line of 'nmcli dev wifi list' output for AP scanning.
     """
     ap = {}
     line_to_parse = line_content.strip()
-    in_use_marker = False
 
+    # If line starts with '*', it's the IN-USE AP; strip the '*' and leading space(s)
+    # to align its structure with other lines for consistent splitting.
     if line_to_parse.startswith("*"):
-        in_use_marker = True
-        # Remove the '*' and the spaces immediately following it before splitting
         line_to_parse = re.sub(r"^\*\s+", "", line_to_parse, count=1)
 
-    # Now, line_to_parse should consistently start with BSSID (or what nmcli puts there)
     parts = re.split(r'\s{2,}', line_to_parse)
-
-    # print(f"  DEBUG parse_nmcli_wifi_line: Line to parse='{line_to_parse}', Parts='{parts}', HeaderMap='{header_map}'")
 
     try:
         def get_part(field_name):
-            idx = header_map.get(field_name.upper()) # header_map now based on columns *after* IN-USE
+            idx = header_map.get(field_name.upper())
             if idx is not None and idx < len(parts):
                 return parts[idx]
             return None
@@ -301,41 +439,39 @@ def parse_nmcli_wifi_line(line_content, header_map):
         if signal_quality_str and signal_quality_str != '--':
             quality = int(signal_quality_str)
             if 0 <= quality <= 100:
+                # Approximate conversion from quality (0-100) to dBm
                 ap['signal_dbm'] = (quality / 2.0) - 100.0
             else:
-                ap['signal_dbm'] = -101 # Invalid quality
+                # Invalid quality
+                ap['signal_dbm'] = -101
         else:
-            ap['signal_dbm'] = -102 # Missing signal quality
+            # Missing signal quality
+            ap['signal_dbm'] = -102
 
         current_ssid = ap.get('ssid')
         if current_ssid == '--' or not current_ssid:
             ap['ssid'] = '<hidden_or_empty>'
 
+        # Validate essential fields before returning
         if not ap.get('bssid') or not ap.get('channel') or 'signal_dbm' not in ap:
-            # print(f"  DEBUG parse_nmcli_wifi_line: Failed validation: {ap} from line '{line_content}'")
             return None
-
     except (IndexError, ValueError) as e:
-        # print(f"  DEBUG parse_nmcli_wifi_line: Exception: {e} for line '{line_content}'")
         return None
-
-    # print(f"  DEBUG parse_nmcli_wifi_line: Successfully parsed: {ap} from line '{line_content}'")
     return ap
 
-
-# scan_wifi_aps_nmcli remains largely the same, it just calls the updated helpers
 def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
+    """Scans for all nearby WiFi APs using nmcli and updates Prometheus metrics."""
     if not interface:
         print("  Skipping nmcli WiFi scan: No wireless interface configured.")
         WIFI_AP_SIGNAL.clear()
         return
 
-    print(f"Scanning for WiFi APs on {interface} using nmcli...")
+    print(f"Scanning for ALL nearby WiFi APs on {interface} using nmcli...")
     aps = []
 
     rescan_cmd = ["nmcli", "dev", "wifi", "rescan", "ifname", interface]
     try:
-        print(f"  Triggering Wi-Fi rescan on {interface}...")
+        print(f"  Triggering Wi-Fi rescan on {interface} for AP list...")
         subprocess.run(rescan_cmd, capture_output=True, text=True, check=False, timeout=10)
         print(f"  Rescan command sent. Waiting a moment for APs to appear...")
         time.sleep(4)
@@ -343,9 +479,10 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
         print(f"  nmcli rescan command timed out for {interface}.")
     except FileNotFoundError:
         print("  Error: 'nmcli' command not found for rescan.")
-        WIFI_AP_SIGNAL.clear(); return
+        WIFI_AP_SIGNAL.clear()
+        return
     except Exception as e:
-        print(f"  Unexpected error during nmcli rescan: {e}")
+        print(f"  Unexpected error during nmcli rescan for AP list: {e}")
 
     list_cmd = ["nmcli", "dev", "wifi", "list", "ifname", interface]
     output_lines = []
@@ -355,33 +492,41 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
         output_lines = result.stdout.strip().splitlines()
 
         if not output_lines:
-            print("  nmcli output is empty after rescan."); WIFI_AP_SIGNAL.clear(); return
+            print("  nmcli AP list output is empty after rescan.")
+            WIFI_AP_SIGNAL.clear()
+            return
 
         header_line_content = output_lines[0]
         data_lines_start_index = 1
 
         header_map = get_nmcli_header_map(header_line_content)
         if not header_map:
-            WIFI_AP_SIGNAL.clear(); print("  Failed to get header map from nmcli output."); return
+            WIFI_AP_SIGNAL.clear()
+            print("  Failed to get header map from nmcli AP list output.")
+            return
 
         for line_content in output_lines[data_lines_start_index:]:
             ap_data = parse_nmcli_wifi_line(line_content, header_map)
             if ap_data:
                 aps.append(ap_data)
 
-    except subprocess.TimeoutExpired: print(f"  nmcli list command timed out for {interface}")
-    except subprocess.CalledProcessError as e: print(f"  Failed to run nmcli list: {e}. Output: {e.stderr.strip()}")
-    except FileNotFoundError: print("  Error: 'nmcli' command not found for listing.")
-    except Exception as e: print(f"  Error during WiFi AP list with nmcli: {e}")
+    except subprocess.TimeoutExpired:
+        print(f"  nmcli AP list command timed out for {interface}")
+    except subprocess.CalledProcessError as e:
+        print(f"  Failed to run nmcli AP list: {e}. Output: {e.stderr.strip()}")
+    except FileNotFoundError:
+        print("  Error: 'nmcli' command not found for AP listing.")
+    except Exception as e:
+        print(f"  Error during WiFi AP list with nmcli: {e}")
 
     WIFI_AP_SIGNAL.clear()
     reported_bssids = set()
     valid_aps_count = 0
 
     if not aps and output_lines and header_map:
-        print("  Warning: nmcli returned data, but no APs were successfully parsed.")
+        print("  Warning: nmcli returned AP data, but no APs were successfully parsed.")
     elif not aps:
-        print("  No AP data collected from nmcli scan.")
+        print("  No AP data collected from nmcli AP scan.")
 
     for ap_dict_item in aps:
         if ap_dict_item.get('bssid') and ap_dict_item['bssid'] not in reported_bssids:
@@ -390,7 +535,8 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
                     continue
 
                 sanitized_ssid = re.sub(r'[^a-zA-Z0-9_:]', '_', ap_dict_item['ssid'])
-                if not sanitized_ssid: sanitized_ssid = "_invalid_ssid_chars_"
+                if not sanitized_ssid:
+                    sanitized_ssid = "_invalid_ssid_chars_"
 
                 WIFI_AP_SIGNAL.labels(
                     ssid=sanitized_ssid, bssid=ap_dict_item['bssid'], channel=str(ap_dict_item['channel'])
@@ -400,9 +546,10 @@ def scan_wifi_aps_nmcli(interface=WIRELESS_INTERFACE):
             except Exception as label_err:
                 print(f"  Error setting label for AP {ap_dict_item.get('ssid','N/A')}. Error: {label_err}")
 
-    print(f"  nmcli scan: Found and processed {valid_aps_count} unique APs after rescan.")
+    print(f"  nmcli AP scan: Found and processed {valid_aps_count} unique nearby APs after rescan.")
     if not valid_aps_count and len(output_lines) > 1 :
-        print("  No APs were successfully processed into metrics, though nmcli output was present.")
+        print("  No APs were successfully processed into metrics, though nmcli AP list output was present.")
+
 
 def update_device_ip(interface_to_check):
     global current_ip_labels
@@ -478,7 +625,8 @@ def generate_new_identifier():
     serial = get_raspberry_pi_serial()
     timestamp_int = int(time.time())
     timestamp_b64 = base64.urlsafe_b64encode(timestamp_int.to_bytes(8, byteorder='big')).rstrip(b'=').decode('utf-8')
-    return f"{serial}-{timestamp_b64}"
+    new_identifier = f"{serial}-{timestamp_b64}"
+    return new_identifier
 
 def save_identifier(identifier):
     try:
@@ -512,11 +660,13 @@ def update_prometheus_identifier(new_identifier):
         current_device_id_label = new_identifier
     except Exception as e:
         print(f"  ERROR setting new Prometheus identifier label '{new_identifier}': {e}")
+        # Abort if we can't set the new label
         return
     if old_label_to_remove and old_label_to_remove != new_identifier:
         try:
             DEVICE_IDENTIFIER.remove(old_label_to_remove)
         except KeyError:
+            # Ignore if not found
             pass
         except Exception as e:
             print(f"  ERROR removing old Prometheus ID label '{old_label_to_remove}': {e}")
@@ -667,7 +817,7 @@ def main():
             print(f"CRITICAL ERROR: '{cmd_name}' command not found. Essential functions will fail. Please install it.")
             # Consider exiting if essential commands are missing
     if subprocess.run(["which", "iwconfig"], capture_output=True, text=True).returncode != 0:
-        print("Warning: 'iwconfig' not found. Connected AP signal (update_wireless_metrics) will fail.")
+        print("Warning: 'iwconfig' not found. Connected AP signal (update_wireless_metrics) may be incomplete.")
 
     try:
         start_http_server(PROMETHEUS_PORT)
@@ -710,8 +860,13 @@ def main():
                 print(f"\n--- Running Scheduled Checks (Interval: {PING_SCAN_IP_INTERVAL}s) ---")
                 ping_if = WIRELESS_INTERFACE if PING_THROUGH_WIFI_ONLY else None
                 run_ping_checks(target=PING_TARGET, interface_to_use=ping_if)
-                update_wireless_metrics(WIRELESS_INTERFACE)
+
+                # This new function handles BSSID, SSID, Channel, Signal, Quality for connected AP
+                update_connected_ap_metrics(WIRELESS_INTERFACE)
+
+                # This function scans for ALL nearby APs
                 scan_wifi_aps_nmcli(WIRELESS_INTERFACE)
+
                 update_device_ip(WIRELESS_INTERFACE)
                 if LAN_INTERFACE:
                     update_device_ip(LAN_INTERFACE)
@@ -720,10 +875,12 @@ def main():
 
             wireless_ip_for_reporting = current_ip_labels.get(WIRELESS_INTERFACE)
             identifier = current_device_id_label
-            ip_changed = (wireless_ip_for_reporting is not None and wireless_ip_for_reporting != last_reported_ip_for_api)
+            ip_changed = (wireless_ip_for_reporting is not None and
+                          wireless_ip_for_reporting != last_reported_ip_for_api)
             time_to_report = (current_time - last_api_report_time >= API_REPORT_INTERVAL)
 
-            if identifier and wireless_ip_for_reporting and PI_SHARED_API_KEY and (ip_changed or time_to_report):
+            if identifier and wireless_ip_for_reporting and PI_SHARED_API_KEY and \
+               (ip_changed or time_to_report):
                  print(f"\n--- Reporting to Registration API (IP: {wireless_ip_for_reporting}, Reason: {'IP Changed' if ip_changed else 'Periodic Update'}) ---")
                  report_ip_to_api(identifier, wireless_ip_for_reporting, PROMETHEUS_PORT)
                  last_api_report_time = current_time
@@ -766,13 +923,13 @@ def main():
                     if speedtest_process and not speedtest_process.is_alive():
                          exit_code = speedtest_process.exitcode
                          print(f"\n--- Speedtest process ended unexpectedly (Exit: {exit_code}) ---")
-                         if exit_code is None:
+                         if exit_code is None: # Still a zombie?
                              try:
                                  speedtest_process.terminate()
                                  speedtest_process.join(timeout=0.1)
                              except Exception:
                                  pass
-                         else:
+                         else: # Already exited
                              speedtest_process.join(timeout=0)
                          speedtest_process = None
                          speedtest_queue = None
