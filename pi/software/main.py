@@ -1,5 +1,3 @@
-# Complete Python script for Raspberry Pi Network Monitor with HTTP SD Reporting
-
 import time
 import subprocess
 import re
