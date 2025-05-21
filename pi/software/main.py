@@ -121,6 +121,7 @@ def get_ip_address_for_interface(interface_name):
     return None
 
 def run_ping_checks(target=PING_TARGET, interface_to_use=None):
+    global PING_RESPONSE_TIME, NETWORK_TTL, NETWORK_JITTER
     """
     Runs ping checks to the specified target, optionally via a specific interface.
     Updates PING_RESPONSE_TIME, NETWORK_TTL, and NETWORK_JITTER gauges.
