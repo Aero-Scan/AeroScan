@@ -70,8 +70,8 @@ UPLOAD_SPEED = Gauge('upload_speed_mbps', 'Upload speed in Mbps')
 WIFI_AP_SIGNAL = Gauge('wifi_ap_signal_strength_dbm', 'Signal strength of nearby WiFi APs (via nmcli)', ['ssid', 'bssid', 'channel'])
 DEVICE_IDENTIFIER = Gauge('device_unique_identifier', 'Unique identifier for the device (SN-Base64Timestamp)', ['identifier'])
 NETWORK_INTERFACE_INFO = Gauge('network_interface_info', 'Basic network interface information (IP Address)', ['interface', 'ip_address'])
-SIGNAL_STRENGTH = Gauge('signal_strength_dbm', 'Signal strength of connected network in dBm (via iwconfig)')
-LINK_QUALITY = Gauge('link_quality_percentage', 'Link quality of connected network in percentage (via iwconfig)')
+#SIGNAL_STRENGTH = Gauge('signal_strength_dbm', 'Signal strength of connected network in dBm (via iwconfig)')
+#LINK_QUALITY = Gauge('link_quality_percentage', 'Link quality of connected network in percentage (via iwconfig)')
 
 NETWORK_JITTER = Gauge('network_jitter_ms', 'Network jitter in ms (calculated from 5 packets)')
 
@@ -294,6 +294,14 @@ def update_connected_ap_metrics(interface=WIRELESS_INTERFACE):
                     nm_signal_quality_str = None
                     if len(parts) >= 5:
                         nm_signal_quality_str = parts[4].strip()
+
+                    # VERY SPECIFIC DEBUG:
+                    print(f"    DEBUG: Comparing iwconfig_bssid='{final_bssid}' (len={len(final_bssid)}) " + \
+                          f"with nmcli_bssid='{nm_bssid}' (len={len(nm_bssid)}) " + \
+                          f"for active='{nm_active}' line: '{line}'")
+                    # Also print their byte representations to see hidden chars
+                    print(f"    DEBUG: final_bssid_bytes={final_bssid.encode('utf-8', 'backslashreplace')}")
+                    print(f"    DEBUG: nmcli_bssid_bytes  ={nm_bssid.encode('utf-8', 'backslashreplace')}")
 
                     if nm_active == 'YES' and nm_bssid == final_bssid:
                         if nm_ssid and nm_ssid != '--':
