@@ -296,12 +296,12 @@ def update_connected_ap_metrics(interface=WIRELESS_INTERFACE):
                         nm_signal_quality_str = parts[4].strip()
 
                     # VERY SPECIFIC DEBUG:
-                    print(f"    DEBUG: Comparing iwconfig_bssid='{final_bssid}' (len={len(final_bssid)}) " + \
-                          f"with nmcli_bssid='{nm_bssid}' (len={len(nm_bssid)}) " + \
-                          f"for active='{nm_active}' line: '{line}'")
+                    #print(f"    DEBUG: Comparing iwconfig_bssid='{final_bssid}' (len={len(final_bssid)}) " + \
+                    #      f"with nmcli_bssid='{nm_bssid}' (len={len(nm_bssid)}) " + \
+                    #      f"for active='{nm_active}' line: '{line}'")
                     # Also print their byte representations to see hidden chars
-                    print(f"    DEBUG: final_bssid_bytes={final_bssid.encode('utf-8', 'backslashreplace')}")
-                    print(f"    DEBUG: nmcli_bssid_bytes  ={nm_bssid.encode('utf-8', 'backslashreplace')}")
+                    #print(f"    DEBUG: final_bssid_bytes={final_bssid.encode('utf-8', 'backslashreplace')}")
+                    #print(f"    DEBUG: nmcli_bssid_bytes  ={nm_bssid.encode('utf-8', 'backslashreplace')}")
 
                     if nm_active == 'YES' and nm_bssid == final_bssid:
                         if nm_ssid and nm_ssid != '--':
