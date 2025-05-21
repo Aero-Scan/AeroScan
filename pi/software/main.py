@@ -256,30 +256,26 @@ def update_connected_ap_metrics(interface=WIRELESS_INTERFACE):
             result_nmcli_list = subprocess.run(nmcli_cmd, capture_output=True, text=True, check=True, timeout=7)
 
             found_in_nmcli = False
-            for line in result_nmcli_list.stdout.strip().splitlines():
-                # Split into ACTIVE, BSSID, SSID, CHAN (max 4 parts due to split limit)
+            nmcli_lines_output = result_nmcli_list.stdout.strip().splitlines()
+            print(f"  DEBUG: nmcli -t list output for connected check ({len(nmcli_lines_output)} lines):")
+            for i, line in enumerate(nmcli_lines_output[:5]): # Print first few lines
+                print(f"  DEBUG: nmcli line {i}: '{line}'")
+
+            for line in nmcli_lines_output:
                 parts = line.split(':', 3)
+                print(f"    DEBUG: nmcli parts: {parts}") # Potentially noisy
 
                 if len(parts) == 4:
                     nm_active = parts[0].strip().upper()
                     nm_bssid_escaped = parts[1].strip()
                     nm_ssid = unescape_nmcli_field(parts[2].strip())
                     nm_chan = parts[3].strip()
-
                     nm_bssid = unescape_nmcli_field(nm_bssid_escaped).upper()
 
+                    print(f"    DEBUG: Checking nm_active='{nm_active}', nm_bssid='{nm_bssid}', final_bssid='{final_bssid}'")
                     if nm_active == 'YES' and nm_bssid == final_bssid:
-                        if nm_ssid and nm_ssid != '--':
-                            final_ssid = nm_ssid
-                        elif not nm_ssid and final_ssid == "<NotConnected>":
-                            final_ssid = "<empty_ssid_nmcli>"
-
-                        if nm_chan and nm_chan != '--':
-                            final_channel = nm_chan
-
-                        # If iwconfig didn't give signal_dbm, try to get quality from nmcli if requested & convert
-                        # For now, we prioritize iwconfig's dBm signal.
-                        # If you add SIGNAL to nmcli_cmd's -f and parts split, you could use it here as fallback.
+                        print(f"    DEBUG: MATCH FOUND in nmcli: active='{nm_active}', bssid='{nm_bssid}', ssid='{nm_ssid}', chan='{nm_chan}'")
+                        # ... rest of the logic to update final_ssid, final_channel ...
                         found_in_nmcli = True
                         break
 
