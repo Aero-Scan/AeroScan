@@ -1,0 +1,41 @@
+---
+- name: Edit File with User-Provided Content
+  hosts: pis # Targets the 'pis' group from your dynamic inventory
+  gather_facts: true
+
+  vars_prompt:
+    - name: "target_directory"
+      prompt: "Enter the directory path where the file should be created/edited (e.g., /tmp, /home/user)"
+      private: false
+    - name: "file_name"
+      prompt: "Enter the name of the file to create or edit (e.g., my_test_file.txt)"
+      private: false
+    - name: "file_content"
+      prompt: "Enter the content to add to the file"
+      private: false
+
+  tasks:
+    - name: Ensure the target directory exists
+      ansible.builtin.file:
+        path: "{{ target_directory }}"
+        state: directory
+        mode: '0755' # Standard permissions for directories
+
+    - name: Create or edit the specified file with provided content
+      ansible.builtin.copy:
+        content: "{{ file_content }}"
+        dest: "{{ target_directory }}/{{ file_name }}"
+        owner: "{{ ansible_user }}" # The user Ansible connects as
+        group: "{{ ansible_user }}"
+        mode: '0644'
+      # become: true # Uncomment if writing to a location that needs root AND ansible_user can't write there
+
+    - name: (Optional) Read back the file content to verify
+      ansible.builtin.slurp:
+        src: "{{ target_directory }}/{{ file_name }}"
+      register: file_content_slurped
+
+    - name: (Optional) Display the file content
+      ansible.builtin.debug:
+        msg: "Content of {{ target_directory }}/{{ file_name }} is: {{ file_content_slurped.content | b64decode }}"
+      when: file_content_slurped is defined and file_content_slurped.content is defined
